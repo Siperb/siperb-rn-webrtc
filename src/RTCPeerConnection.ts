@@ -629,8 +629,6 @@ export default class RTCPeerConnection extends EventTarget<RTCPeerConnectionEven
     }
 
     async getStats(selector?: MediaStreamTrack) {
-        log.debug(`${this._pcId} getStats`);
-
         if (!selector) {
             const data = await WebRTCModule.peerConnectionGetStats(this._pcId);
 
