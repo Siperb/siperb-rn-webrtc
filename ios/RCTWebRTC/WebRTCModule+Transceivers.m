@@ -3,6 +3,7 @@
 #import <React/RCTBridge.h>
 #import <React/RCTBridgeModule.h>
 
+#import <WebRTC/RTCDtmfSender.h>
 #import <WebRTC/RTCRtpCodecCapability.h>
 #import <WebRTC/RTCRtpReceiver.h>
 #import <WebRTC/RTCRtpSender.h>
@@ -91,6 +92,65 @@ RCT_EXPORT_METHOD(senderSetParameters : (nonnull NSNumber *)objectID senderId : 
     [sender setParameters:[self updateParametersWithOptions:options params:parameters]];
 
     resolve([SerializeUtils parametersToJSON:sender.parameters]);
+}
+
+RCT_EXPORT_METHOD(senderInsertDtmf : (nonnull NSNumber *)objectID senderId : (NSString *)senderId tones : (
+    NSString *)tones duration : (nonnull NSNumber *)duration interToneGap : (nonnull NSNumber *)interToneGap resolver : (
+    RCTPromiseResolveBlock)resolve rejecter : (RCTPromiseRejectBlock)reject) {
+    RTCPeerConnection *peerConnection = self.peerConnections[objectID];
+
+    if (peerConnection == nil) {
+        RCTLogWarn(@"PeerConnection %@ not found in senderInsertDtmf()", objectID);
+        reject(@"E_INVALID", @"Peer Connection is not initialized", nil);
+        return;
+    }
+
+    RTCRtpSender *sender = nil;
+    for (RTCRtpTransceiver *t in peerConnection.transceivers) {
+        if ([senderId isEqual:t.sender.senderId]) {
+            sender = t.sender;
+            break;
+        }
+    }
+
+    if (sender == nil) {
+        RCTLogWarn(@"senderInsertDtmf() sender is null");
+        reject(@"E_INVALID", @"Could not get sender", nil);
+        return;
+    }
+
+    id<RTCDtmfSender> dtmfSender = sender.dtmfSender;
+    if (dtmfSender == nil) {
+        RCTLogWarn(@"senderInsertDtmf() sender has no DtmfSender");
+        reject(@"E_INVALID", @"Sender does not support DTMF", nil);
+        return;
+    }
+
+    // libwebrtc owns the real RFC 4733 RTP playout/timing; forward the tone
+    // string in one call. RTCDtmfSender expresses timings in seconds, whereas
+    // the W3C/JS API (and Android) use milliseconds — convert here.
+    BOOL inserted = [dtmfSender insertDtmf:tones
+                                  duration:duration.doubleValue / 1000.0
+                              interToneGap:interToneGap.doubleValue / 1000.0];
+    resolve(@(inserted));
+}
+
+RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(senderCanInsertDtmf : (nonnull NSNumber *)objectID senderId : (NSString *)
+                                           senderId) {
+    RTCPeerConnection *peerConnection = self.peerConnections[objectID];
+
+    if (peerConnection == nil) {
+        return @(NO);
+    }
+
+    for (RTCRtpTransceiver *t in peerConnection.transceivers) {
+        if ([senderId isEqual:t.sender.senderId]) {
+            id<RTCDtmfSender> dtmfSender = t.sender.dtmfSender;
+            return @(dtmfSender != nil && dtmfSender.canInsertDtmf);
+        }
+    }
+
+    return @(NO);
 }
 
 RCT_EXPORT_METHOD(transceiverSetDirection : (nonnull NSNumber *)objectID senderId : (NSString *)senderId direction : (

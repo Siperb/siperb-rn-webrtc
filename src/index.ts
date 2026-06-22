@@ -17,6 +17,7 @@ import MediaStreamTrackEvent from './MediaStreamTrackEvent';
 import permissions from './Permissions';
 import RTCAudioSession from './RTCAudioSession';
 import RTCCertificate from './RTCCertificate';
+import RTCDTMFSender from './RTCDTMFSender';
 import RTCErrorEvent from './RTCErrorEvent';
 import RTCIceCandidate from './RTCIceCandidate';
 import RTCPIPView, { startIOSPIP, stopIOSPIP } from './RTCPIPView';
@@ -40,6 +41,7 @@ export {
     RTCPeerConnection,
     RTCSessionDescription,
     RTCCertificate,
+    RTCDTMFSender,
     RTCView,
     RTCPIPView,
     ScreenCapturePickerView,

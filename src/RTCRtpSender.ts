@@ -1,6 +1,7 @@
 import { NativeModules } from 'react-native';
 
 import MediaStreamTrack from './MediaStreamTrack';
+import RTCDTMFSender from './RTCDTMFSender';
 import RTCRtpCapabilities from './RTCRtpCapabilities';
 import RTCRtpSendParameters, { RTCRtpSendParametersInit } from './RTCRtpSendParameters';
 
@@ -12,6 +13,7 @@ export default class RTCRtpSender {
     _track: MediaStreamTrack | null = null;
     _peerConnectionId: number;
     _rtpParameters: RTCRtpSendParameters;
+    _dtmf: RTCDTMFSender | null = null;
 
     constructor(info: {
         peerConnectionId: number,
@@ -66,6 +68,23 @@ export default class RTCRtpSender {
             */
             new Map(JSON.parse(data))
         );
+    }
+
+    /**
+     * RFC 4733 in-band DTMF. Per the W3C spec this is non-null only for audio
+     * senders; we gate on the attached track's kind, which matches how callers
+     * locate the DTMF-capable sender (an audio track must be present to send).
+     */
+    get dtmf(): RTCDTMFSender | null {
+        if (this._track?.kind !== 'audio') {
+            return null;
+        }
+
+        if (!this._dtmf) {
+            this._dtmf = new RTCDTMFSender({ peerConnectionId: this._peerConnectionId, senderId: this._id });
+        }
+
+        return this._dtmf;
     }
 
     get track() {

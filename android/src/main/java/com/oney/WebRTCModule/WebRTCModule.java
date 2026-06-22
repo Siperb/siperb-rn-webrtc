@@ -690,6 +690,67 @@ public class WebRTCModule extends ReactContextBaseJavaModule {
     }
 
     @ReactMethod
+    public void senderInsertDtmf(int id, String senderId, String tones, int duration, int interToneGap, Promise promise) {
+        ThreadUtils.runOnExecutor(() -> {
+            try {
+                PeerConnectionObserver pco = mPeerConnectionObservers.get(id);
+                if (pco == null) {
+                    Log.d(TAG, "senderInsertDtmf() peerConnectionObserver is null");
+                    promise.reject(new Exception("Peer Connection is not initialized"));
+                    return;
+                }
+
+                RtpSender sender = pco.getSender(senderId);
+                if (sender == null) {
+                    Log.w(TAG, "senderInsertDtmf() sender is null");
+                    promise.reject(new Exception("Could not get sender"));
+                    return;
+                }
+
+                DtmfSender dtmfSender = sender.dtmf();
+                if (dtmfSender == null) {
+                    Log.w(TAG, "senderInsertDtmf() sender has no DtmfSender");
+                    promise.reject(new Exception("Sender does not support DTMF"));
+                    return;
+                }
+
+                // libwebrtc produces the RFC 4733 telephone-event RTP and owns the
+                // real playout timing; we forward the whole tone string in one call.
+                boolean inserted = dtmfSender.insertDtmf(tones, duration, interToneGap);
+                promise.resolve(inserted);
+            } catch (Exception e) {
+                Log.d(TAG, "senderInsertDtmf(): " + e.getMessage());
+                promise.reject(e);
+            }
+        });
+    }
+
+    @ReactMethod(isBlockingSynchronousMethod = true)
+    public boolean senderCanInsertDtmf(int id, String senderId) {
+        try {
+            return ThreadUtils
+                    .submitToExecutor((Callable<Object>) () -> {
+                        PeerConnectionObserver pco = mPeerConnectionObservers.get(id);
+                        if (pco == null) {
+                            return false;
+                        }
+
+                        RtpSender sender = pco.getSender(senderId);
+                        if (sender == null) {
+                            return false;
+                        }
+
+                        DtmfSender dtmfSender = sender.dtmf();
+                        return dtmfSender != null && dtmfSender.canInsertDtmf();
+                    })
+                    .get() == Boolean.TRUE;
+        } catch (ExecutionException | InterruptedException e) {
+            Log.d(TAG, "senderCanInsertDtmf() " + e.getMessage());
+            return false;
+        }
+    }
+
+    @ReactMethod
     public void transceiverSetDirection(int id, String senderId, String direction, Promise promise) {
         ThreadUtils.runOnExecutor(() -> {
             WritableMap identifier = Arguments.createMap();
