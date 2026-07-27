@@ -1,4 +1,5 @@
 #import <AVFoundation/AVFoundation.h>
+#import <AudioToolbox/AudioToolbox.h>
 #import <os/lock.h>
 #import <stdio.h>
 
@@ -416,55 +417,136 @@ static BOOL PatchWavHeaderFromLength(NSString *wavPath, NSError **error) {
         return nil;
     }
 
-    NSError *avError = nil;
-    AVAudioFile *source = [[AVAudioFile alloc] initForReading:[NSURL fileURLWithPath:wavPath] error:&avError];
-    if (source == nil) {
+    // Encode via ExtAudioFile: we KNOW the WAV layout (we wrote it), so feed the
+    // int16 PCM straight into the AAC converter instead of trusting AVAudioFile's
+    // format negotiation (which failed opaquely with nil NSErrors on device).
+    // Every failure path carries the exact OSStatus for diagnosis.
+    uint32_t srcRate = 0;
+    uint16_t srcChannels = 0;
+    uint16_t srcBits = 0;
+    uint32_t dataBytes = 0;
+    {
+        FILE *header = fopen(wavPath.UTF8String, "rb");
+        uint8_t fields[24];
+        // fmt chunk fields live at offset 22 (channels u16, rate u32, ..., bits u16 at 34), data size at 40.
+        BOOL headerOk = header != NULL && fseek(header, 22, SEEK_SET) == 0 && fread(fields, 1, 22, header) == 22;
+        if (header != NULL) {
+            fclose(header);
+        }
+        if (!headerOk) {
+            if (error) {
+                *error = CallRecordingError(CallRecordingErrorIO,
+                                            [NSString stringWithFormat:@"Cannot re-read WAV header: %@", wavPath]);
+            }
+            return nil;
+        }
+        srcChannels = (uint16_t)(fields[0] | (fields[1] << 8));
+        srcRate = (uint32_t)(fields[2] | (fields[3] << 8) | ((uint32_t)fields[4] << 16) | ((uint32_t)fields[5] << 24));
+        srcBits = (uint16_t)(fields[12] | (fields[13] << 8));
+        dataBytes = (uint32_t)(fields[18] | (fields[19] << 8) | ((uint32_t)fields[20] << 16) | ((uint32_t)fields[21] << 24));
+    }
+    if (srcBits != 16 || srcChannels == 0 || srcRate == 0 || dataBytes == 0) {
         if (error) {
             *error = CallRecordingError(
                 CallRecordingErrorEncode,
-                [NSString stringWithFormat:@"Cannot read WAV: %@", avError.localizedDescription]);
+                [NSString stringWithFormat:@"Unexpected WAV format (%u Hz, %u ch, %u bit)", srcRate, srcChannels,
+                                           srcBits]);
         }
         return nil;
     }
-    long long durationMs = llround((double)source.length * 1000.0 / source.processingFormat.sampleRate);
+    const uint32_t bytesPerFrame = (uint32_t)srcChannels * 2;
+    long long durationMs = llround((double)(dataBytes / bytesPerFrame) * 1000.0 / srcRate);
 
     [[NSFileManager defaultManager] removeItemAtPath:m4aPath error:nil];  // clean retry after a failed encode
-    NSDictionary *settings = @{
-        AVFormatIDKey : @(kAudioFormatMPEG4AAC),
-        AVSampleRateKey : @(kTargetSampleRate),
-        AVNumberOfChannelsKey : @(1),
-        AVEncoderBitRateKey : @(64000),
-    };
-    AVAudioFile *destination = [[AVAudioFile alloc] initForWriting:[NSURL fileURLWithPath:m4aPath]
-                                                          settings:settings
-                                                      commonFormat:source.processingFormat.commonFormat
-                                                       interleaved:source.processingFormat.isInterleaved
-                                                             error:&avError];
-    AVAudioPCMBuffer *buffer = destination
-        ? [[AVAudioPCMBuffer alloc] initWithPCMFormat:source.processingFormat frameCapacity:32768]
-        : nil;
-    BOOL encoded = buffer != nil;
-    while (encoded) {
-        if (![source readIntoBuffer:buffer error:&avError]) {
-            encoded = NO;
-            break;
+
+    AudioStreamBasicDescription srcDesc = {0};
+    srcDesc.mSampleRate = srcRate;
+    srcDesc.mFormatID = kAudioFormatLinearPCM;
+    srcDesc.mFormatFlags = kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked;
+    srcDesc.mBitsPerChannel = 16;
+    srcDesc.mChannelsPerFrame = srcChannels;
+    srcDesc.mBytesPerFrame = bytesPerFrame;
+    srcDesc.mFramesPerPacket = 1;
+    srcDesc.mBytesPerPacket = bytesPerFrame;
+
+    AudioStreamBasicDescription dstDesc = {0};
+    dstDesc.mSampleRate = srcRate;
+    dstDesc.mFormatID = kAudioFormatMPEG4AAC;
+    dstDesc.mChannelsPerFrame = srcChannels;
+
+    ExtAudioFileRef extFile = NULL;
+    OSStatus status = ExtAudioFileCreateWithURL((__bridge CFURLRef)[NSURL fileURLWithPath:m4aPath], kAudioFileM4AType,
+                                                &dstDesc, NULL, kAudioFileFlags_EraseFile, &extFile);
+    if (status == noErr) {
+        status = ExtAudioFileSetProperty(extFile, kExtAudioFileProperty_ClientDataFormat, sizeof(srcDesc), &srcDesc);
+    }
+    if (status == noErr) {
+        // Best-effort 64 kbps; the hardware/software converter's default stands if this fails.
+        AudioConverterRef converter = NULL;
+        UInt32 size = sizeof(converter);
+        if (ExtAudioFileGetProperty(extFile, kExtAudioFileProperty_AudioConverter, &size, &converter) == noErr &&
+            converter != NULL) {
+            UInt32 bitRate = 64000;
+            if (AudioConverterSetProperty(converter, kAudioConverterEncodeBitRate, sizeof(bitRate), &bitRate) !=
+                noErr) {
+                RCTLogWarn(@"[CallRecording] Could not set 64kbps AAC bitrate; using converter default");
+            } else {
+                CFArrayRef config = NULL;  // flush the converter state after changing properties
+                ExtAudioFileSetProperty(extFile, kExtAudioFileProperty_ConverterConfig, sizeof(config), &config);
+            }
         }
-        if (buffer.frameLength == 0) {
-            break;  // EOF
+    }
+
+    BOOL encoded = NO;
+    if (status == noErr) {
+        FILE *pcm = fopen(wavPath.UTF8String, "rb");
+        if (pcm == NULL || fseek(pcm, kWavHeaderSize, SEEK_SET) != 0) {
+            status = kAudioFileUnspecifiedError;
+            if (pcm != NULL) {
+                fclose(pcm);
+                pcm = NULL;
+            }
+        } else {
+            enum { kEncodeChunkFrames = 16384 };
+            int16_t *chunk = malloc((size_t)kEncodeChunkFrames * bytesPerFrame);
+            uint32_t framesLeft = dataBytes / bytesPerFrame;
+            encoded = chunk != NULL;
+            while (encoded && framesLeft > 0) {
+                uint32_t frames = framesLeft < kEncodeChunkFrames ? framesLeft : kEncodeChunkFrames;
+                size_t readFrames = fread(chunk, bytesPerFrame, frames, pcm);
+                if (readFrames == 0) {
+                    break;  // truncated file — encode what we had
+                }
+                AudioBufferList bufferList;
+                bufferList.mNumberBuffers = 1;
+                bufferList.mBuffers[0].mNumberChannels = srcChannels;
+                bufferList.mBuffers[0].mDataByteSize = (UInt32)(readFrames * bytesPerFrame);
+                bufferList.mBuffers[0].mData = chunk;
+                status = ExtAudioFileWrite(extFile, (UInt32)readFrames, &bufferList);
+                if (status != noErr) {
+                    encoded = NO;
+                    break;
+                }
+                framesLeft -= (uint32_t)readFrames;
+            }
+            free(chunk);
+            fclose(pcm);
         }
-        if (![destination writeFromBuffer:buffer error:&avError]) {
+    }
+    if (extFile != NULL) {
+        OSStatus disposeStatus = ExtAudioFileDispose(extFile);  // flushes + finalizes the .m4a container
+        if (encoded && disposeStatus != noErr) {
+            status = disposeStatus;
             encoded = NO;
         }
     }
-    source = nil;
-    destination = nil;  // AVAudioFile finalizes the .m4a container on release
 
     if (!encoded) {
         [[NSFileManager defaultManager] removeItemAtPath:m4aPath error:nil];  // keep only the WAV for salvage
         if (error) {
             *error = CallRecordingError(
                 CallRecordingErrorEncode,
-                [NSString stringWithFormat:@"AAC encode failed: %@", avError.localizedDescription ?: @"unknown"]);
+                [NSString stringWithFormat:@"AAC encode failed (OSStatus %d)", (int)status]);
         }
         return nil;
     }
