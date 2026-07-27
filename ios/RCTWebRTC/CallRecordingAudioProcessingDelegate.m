@@ -51,7 +51,10 @@ enum { kMaxCaptureChannels = 8 };
     for (size_t c = 0; c < channels; c++) {
         channelData[c] = [audioBuffer rawBufferForChannel:c];
     }
-    const float scale = 32767.0f / (float)channels;  // downmix by averaging, then float [-1,1] -> int16
+    // WebRTC's audio-processing buffers are "FloatS16": float samples ALREADY in
+    // int16 range (±32768), NOT normalized [-1,1]. Scaling by 32767 here clipped
+    // every sample into square-wave static. Downmix by averaging only, then cast.
+    const float scale = 1.0f / (float)channels;
     for (size_t i = 0; i < frames; i++) {
         float acc = 0;
         for (size_t c = 0; c < channels; c++) {
