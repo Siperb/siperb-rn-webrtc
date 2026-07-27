@@ -17,6 +17,9 @@
 #import <WebRTC/RTCSessionDescription.h>
 #import <WebRTC/RTCStatisticsReport.h>
 
+#import <WebRTC/RTCAudioTrack.h>
+
+#import "CallAudioRecordingManager.h"
 #import "SerializeUtils.h"
 #import "WebRTCModule+RTCDataChannel.h"
 #import "WebRTCModule+RTCPeerConnection.h"
@@ -309,11 +312,27 @@ RCT_EXPORT_METHOD(peerConnectionAddICECandidate : (nonnull NSNumber *)objectID c
     [peerConnection addIceCandidate:candidate completionHandler:handler];
 }
 
+/** Mirrors Android PeerConnectionObserver.close(): recording sinks must come off
+    a connection's remote audio tracks before the tracks can be torn down. */
+- (void)detachRecordingSinksForPeerConnection:(RTCPeerConnection *)peerConnection {
+    CallAudioRecordingManager *manager = [CallAudioRecordingManager sharedManager];
+    for (RTCMediaStreamTrack *track in peerConnection.remoteTracks.allValues) {
+        if ([track isKindOfClass:[RTCAudioTrack class]]) {
+            [manager detachSinksForTrack:(RTCAudioTrack *)track];
+        }
+    }
+}
+
 RCT_EXPORT_METHOD(peerConnectionClose : (nonnull NSNumber *)objectID) {
     RTCPeerConnection *peerConnection = self.peerConnections[objectID];
     if (!peerConnection) {
         return;
     }
+
+    // Detach any call-recording renderers from this connection's remote audio
+    // tracks before teardown so no renderer fires into (or is removed from) a
+    // closed track. Affected recorders keep running zero-padded until stopped.
+    [self detachRecordingSinksForPeerConnection:peerConnection];
 
     [peerConnection close];
 }
@@ -323,6 +342,9 @@ RCT_EXPORT_METHOD(peerConnectionDispose : (nonnull NSNumber *)objectID) {
     if (!peerConnection) {
         return;
     }
+
+    // Defensive re-detach for any path that disposes without close(); no-op otherwise.
+    [self detachRecordingSinksForPeerConnection:peerConnection];
 
     // Remove video track adapters
     for (NSString *key in peerConnection.remoteTracks.allKeys) {

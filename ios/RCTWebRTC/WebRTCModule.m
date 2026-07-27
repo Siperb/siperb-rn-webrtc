@@ -7,6 +7,7 @@
 #import <React/RCTLog.h>
 #import <React/RCTUtils.h>
 
+#import "CallAudioRecordingManager.h"
 #import "WebRTCModule+RTCPeerConnection.h"
 #import "WebRTCModule.h"
 #import "WebRTCModuleOptions.h"
@@ -69,9 +70,29 @@
         RCTLogInfo(@"Using video encoder factory: %@", NSStringFromClass([encoderFactory class]));
         RCTLogInfo(@"Using video decoder factory: %@", NSStringFromClass([decoderFactory class]));
 
-        _peerConnectionFactory = [[RTCPeerConnectionFactory alloc] initWithEncoderFactory:encoderFactory
-                                                                           decoderFactory:decoderFactory
-                                                                              audioDevice:audioDevice];
+        if (audioDevice == nil) {
+            // Build the factory with an audio processing module so the call recorder can tap
+            // post-AEC mic audio. The module holds its capture delegate weakly (the recording
+            // manager owns it) and the factory does not retain the module, hence the property.
+            CallAudioRecordingManager *recordingManager = [CallAudioRecordingManager sharedManager];
+            _audioProcessingModule =
+                [[RTCDefaultAudioProcessingModule alloc] initWithConfig:nil
+                                          capturePostProcessingDelegate:recordingManager.micDelegate
+                                            renderPreProcessingDelegate:nil];
+            recordingManager.micCaptureAvailable = YES;
+            _peerConnectionFactory =
+                [[RTCPeerConnectionFactory alloc] initWithBypassVoiceProcessing:NO
+                                                                 encoderFactory:encoderFactory
+                                                                 decoderFactory:decoderFactory
+                                                          audioProcessingModule:_audioProcessingModule];
+        } else {
+            // A custom audio device rules out the processing-module initializer, so the call
+            // recorder has no mic tap in this configuration (recordings drop the mic leg).
+            RCTLogWarn(@"CallRecording: custom audioDevice injected, mic capture for recording is unavailable");
+            _peerConnectionFactory = [[RTCPeerConnectionFactory alloc] initWithEncoderFactory:encoderFactory
+                                                                               decoderFactory:decoderFactory
+                                                                                  audioDevice:audioDevice];
+        }
 
         _peerConnections = [NSMutableDictionary new];
         _localStreams = [NSMutableDictionary new];
@@ -120,7 +141,10 @@ RCT_EXPORT_MODULE();
         kEventMediaStreamTrackMuteChanged,
         kEventMediaStreamTrackEnded,
         kEventPeerConnectionOnRemoveTrack,
-        kEventPeerConnectionOnTrack
+        kEventPeerConnectionOnTrack,
+        kEventAudioRecordingStarted,
+        kEventAudioRecordingStopped,
+        kEventAudioRecordingError
     ];
 }
 

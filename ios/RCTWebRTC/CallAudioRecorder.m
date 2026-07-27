@@ -14,8 +14,11 @@ static const NSUInteger kRingCapacity = 24000;  // ~500 ms per source, drop-olde
 static const uint64_t kTickIntervalNs = 10 * NSEC_PER_MSEC;
 static const NSUInteger kWarmupTicks = 20;  // 200 ms: skip all-empty ticks while sources spin up
 static const NSUInteger kMaxDrainTicks = 256;
-static const NSUInteger kWavHeaderSize = 44;
-static const NSUInteger kResampleChunkCapacity = 4096;  // stack scratch for one resampled slice
+// enum (not static const) so these can size stack arrays without a VLA warning
+enum {
+    kWavHeaderSize = 44,
+    kResampleChunkCapacity = 4096,  // stack scratch for one resampled slice
+};
 
 static NSError *CallRecordingError(CallRecordingErrorCode code, NSString *message) {
     return [NSError errorWithDomain:kCallRecordingErrorDomain

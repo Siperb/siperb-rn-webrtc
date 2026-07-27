@@ -26,6 +26,11 @@
 		D74EF94829652169000742E1 /* TrackCapturerEventsEmitter.m in Sources */ = {isa = PBXBuildFile; fileRef = D74EF94629652169000742E1 /* TrackCapturerEventsEmitter.m */; };
 		D7F0711E2C6DC91F0031F594 /* WebRTCModule+RTCAudioSession.m in Sources */ = {isa = PBXBuildFile; fileRef = D7F0711D2C6DC91F0031F594 /* WebRTCModule+RTCAudioSession.m */; };
 		DEC96577264176C10052DB35 /* DataChannelWrapper.m in Sources */ = {isa = PBXBuildFile; fileRef = DEC96576264176C10052DB35 /* DataChannelWrapper.m */; };
+		D7CA0001000000000000A001 /* CallAudioRecorder.m in Sources */ = {isa = PBXBuildFile; fileRef = D7CA0001000000000000F001 /* CallAudioRecorder.m */; };
+		D7CA0001000000000000A002 /* CallAudioRecordingManager.m in Sources */ = {isa = PBXBuildFile; fileRef = D7CA0001000000000000F003 /* CallAudioRecordingManager.m */; };
+		D7CA0001000000000000A003 /* CallRecordingAudioProcessingDelegate.m in Sources */ = {isa = PBXBuildFile; fileRef = D7CA0001000000000000F005 /* CallRecordingAudioProcessingDelegate.m */; };
+		D7CA0001000000000000A004 /* RemoteAudioSink.m in Sources */ = {isa = PBXBuildFile; fileRef = D7CA0001000000000000F007 /* RemoteAudioSink.m */; };
+		D7CA0001000000000000A005 /* WebRTCModule+CallRecording.m in Sources */ = {isa = PBXBuildFile; fileRef = D7CA0001000000000000F009 /* WebRTCModule+CallRecording.m */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -80,6 +85,16 @@
 		D7F99C122938F4E0000A2450 /* WebRTCModule+RTCMediaStream.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = "WebRTCModule+RTCMediaStream.h"; path = "RCTWebRTC/WebRTCModule+RTCMediaStream.h"; sourceTree = SOURCE_ROOT; };
 		DEC96576264176C10052DB35 /* DataChannelWrapper.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = DataChannelWrapper.m; path = RCTWebRTC/DataChannelWrapper.m; sourceTree = "<group>"; };
 		DEC96579264176DF0052DB35 /* DataChannelWrapper.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = DataChannelWrapper.h; path = RCTWebRTC/DataChannelWrapper.h; sourceTree = "<group>"; };
+		D7CA0001000000000000F001 /* CallAudioRecorder.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = CallAudioRecorder.m; path = RCTWebRTC/CallAudioRecorder.m; sourceTree = SOURCE_ROOT; };
+		D7CA0001000000000000F002 /* CallAudioRecorder.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = CallAudioRecorder.h; path = RCTWebRTC/CallAudioRecorder.h; sourceTree = SOURCE_ROOT; };
+		D7CA0001000000000000F003 /* CallAudioRecordingManager.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = CallAudioRecordingManager.m; path = RCTWebRTC/CallAudioRecordingManager.m; sourceTree = SOURCE_ROOT; };
+		D7CA0001000000000000F004 /* CallAudioRecordingManager.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = CallAudioRecordingManager.h; path = RCTWebRTC/CallAudioRecordingManager.h; sourceTree = SOURCE_ROOT; };
+		D7CA0001000000000000F005 /* CallRecordingAudioProcessingDelegate.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = CallRecordingAudioProcessingDelegate.m; path = RCTWebRTC/CallRecordingAudioProcessingDelegate.m; sourceTree = SOURCE_ROOT; };
+		D7CA0001000000000000F006 /* CallRecordingAudioProcessingDelegate.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = CallRecordingAudioProcessingDelegate.h; path = RCTWebRTC/CallRecordingAudioProcessingDelegate.h; sourceTree = SOURCE_ROOT; };
+		D7CA0001000000000000F007 /* RemoteAudioSink.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = RemoteAudioSink.m; path = RCTWebRTC/RemoteAudioSink.m; sourceTree = SOURCE_ROOT; };
+		D7CA0001000000000000F008 /* RemoteAudioSink.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = RemoteAudioSink.h; path = RCTWebRTC/RemoteAudioSink.h; sourceTree = SOURCE_ROOT; };
+		D7CA0001000000000000F009 /* WebRTCModule+CallRecording.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = "WebRTCModule+CallRecording.m"; path = "RCTWebRTC/WebRTCModule+CallRecording.m"; sourceTree = SOURCE_ROOT; };
+		D7CA0001000000000000F00A /* WebRTCModule+CallRecording.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = "WebRTCModule+CallRecording.h"; path = "RCTWebRTC/WebRTCModule+CallRecording.h"; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -124,6 +139,16 @@
 		35A222311CB493C00015FD5C /* RCTWebRTC */ = {
 			isa = PBXGroup;
 			children = (
+				D7CA0001000000000000F002 /* CallAudioRecorder.h */,
+				D7CA0001000000000000F001 /* CallAudioRecorder.m */,
+				D7CA0001000000000000F004 /* CallAudioRecordingManager.h */,
+				D7CA0001000000000000F003 /* CallAudioRecordingManager.m */,
+				D7CA0001000000000000F006 /* CallRecordingAudioProcessingDelegate.h */,
+				D7CA0001000000000000F005 /* CallRecordingAudioProcessingDelegate.m */,
+				D7CA0001000000000000F008 /* RemoteAudioSink.h */,
+				D7CA0001000000000000F007 /* RemoteAudioSink.m */,
+				D7CA0001000000000000F00A /* WebRTCModule+CallRecording.h */,
+				D7CA0001000000000000F009 /* WebRTCModule+CallRecording.m */,
 				4EE3A8A225B840DA00FAA24A /* RCTConvert+WebRTC.h */,
 				4EE3A8A125B840DA00FAA24A /* RCTConvert+WebRTC.m */,
 				4EE3A8A525B8411400FAA24A /* RTCMediaStreamTrack+React.h */,
@@ -273,6 +298,11 @@
 				4EE3A8AC25B8412700FAA24A /* RTCVideoViewManager.m in Sources */,
 				4EE3A8C125B8416F00FAA24A /* WebRTCModule+RTCPeerConnection.m in Sources */,
 				4EE3A8A325B840DA00FAA24A /* RCTConvert+WebRTC.m in Sources */,
+				D7CA0001000000000000A001 /* CallAudioRecorder.m in Sources */,
+				D7CA0001000000000000A002 /* CallAudioRecordingManager.m in Sources */,
+				D7CA0001000000000000A003 /* CallRecordingAudioProcessingDelegate.m in Sources */,
+				D7CA0001000000000000A004 /* RemoteAudioSink.m in Sources */,
+				D7CA0001000000000000A005 /* WebRTCModule+CallRecording.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

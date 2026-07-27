@@ -21,6 +21,9 @@ static NSString *const kEventMediaStreamTrackMuteChanged = @"mediaStreamTrackMut
 static NSString *const kEventMediaStreamTrackEnded = @"mediaStreamTrackEnded";
 static NSString *const kEventPeerConnectionOnRemoveTrack = @"peerConnectionOnRemoveTrack";
 static NSString *const kEventPeerConnectionOnTrack = @"peerConnectionOnTrack";
+static NSString *const kEventAudioRecordingStarted = @"audioRecordingStarted";
+static NSString *const kEventAudioRecordingStopped = @"audioRecordingStopped";
+static NSString *const kEventAudioRecordingError = @"audioRecordingError";
 
 @interface WebRTCModule : RCTEventEmitter<RCTBridgeModule>
 
@@ -29,6 +32,10 @@ static NSString *const kEventPeerConnectionOnTrack = @"peerConnectionOnTrack";
 @property(nonatomic, strong) RTCPeerConnectionFactory *peerConnectionFactory;
 @property(nonatomic, strong) id<RTCVideoDecoderFactory> decoderFactory;
 @property(nonatomic, strong) id<RTCVideoEncoderFactory> encoderFactory;
+
+// Retained because the factory does not own it and it holds the call-recording mic
+// delegate weakly; nil when a custom audioDevice was injected via WebRTCModuleOptions.
+@property(nonatomic, strong) RTCDefaultAudioProcessingModule *audioProcessingModule;
 
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, RTCPeerConnection *> *peerConnections;
 @property(nonatomic, strong) NSMutableDictionary<NSString *, RTCMediaStream *> *localStreams;
