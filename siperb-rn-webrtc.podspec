@@ -19,5 +19,5 @@ Pod::Spec.new do |s|
   s.libraries           = 'c', 'sqlite3', 'stdc++'
   s.framework           = 'AudioToolbox','AVFoundation', 'CoreAudio', 'CoreGraphics', 'CoreVideo', 'GLKit', 'VideoToolbox'
   s.dependency          'React-Core'
-  s.dependency          'JitsiWebRTC', '~> 124.0.0'
+  s.dependency          'WebRTC-SDK', '125.6422.07'
 end

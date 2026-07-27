@@ -21,6 +21,7 @@ import com.facebook.react.bridge.WritableArray;
 import com.facebook.react.bridge.WritableMap;
 import com.facebook.react.module.annotations.ReactModule;
 import com.facebook.react.modules.core.DeviceEventManagerModule;
+import com.oney.WebRTCModule.audiorecorder.CallAudioRecordingManager;
 import com.oney.WebRTCModule.webrtcutils.H264AndSoftwareVideoDecoderFactory;
 import com.oney.WebRTCModule.webrtcutils.H264AndSoftwareVideoEncoderFactory;
 
@@ -49,6 +50,7 @@ public class WebRTCModule extends ReactContextBaseJavaModule {
     VideoEncoderFactory mVideoEncoderFactory;
     VideoDecoderFactory mVideoDecoderFactory;
     AudioDeviceModule mAudioDeviceModule;
+    private final CallAudioRecordingManager mCallAudioRecordingManager;
 
     // Need to expose the peer connection codec factories here to get capabilities
     private final SparseArray<PeerConnectionObserver> mPeerConnectionObservers;
@@ -97,8 +99,18 @@ public class WebRTCModule extends ReactContextBaseJavaModule {
             }
         }
 
+        mCallAudioRecordingManager = new CallAudioRecordingManager(this);
+
         if (adm == null) {
-            adm = JavaAudioDeviceModule.builder(reactContext).setEnableVolumeLogger(false).createAudioDeviceModule();
+            // Chain the call-recording mic tap only into the default ADM. An app-injected
+            // ADM is left untouched, which means mic capture for recording is unavailable.
+            adm = JavaAudioDeviceModule.builder(reactContext)
+                          .setEnableVolumeLogger(false)
+                          .setSamplesReadyCallback(mCallAudioRecordingManager.getMicDispatcher())
+                          .createAudioDeviceModule();
+            mCallAudioRecordingManager.setMicCaptureAvailable(true);
+        } else {
+            Log.w(TAG, "Custom AudioDeviceModule injected; call recording mic capture is unavailable.");
         }
 
         Log.d(TAG, "Using video encoder factory: " + encoderFactory.getClass().getCanonicalName());
@@ -132,10 +144,15 @@ public class WebRTCModule extends ReactContextBaseJavaModule {
         return (pco == null) ? null : pco.getPeerConnection();
     }
 
-    void sendEvent(String eventName, @Nullable ReadableMap params) {
+    // Public so the audiorecorder package can emit through the same mechanism.
+    public void sendEvent(String eventName, @Nullable ReadableMap params) {
         getReactApplicationContext()
                 .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
                 .emit(eventName, params);
+    }
+
+    CallAudioRecordingManager getCallAudioRecordingManager() {
+        return mCallAudioRecordingManager;
     }
 
     private PeerConnection.IceServer createIceServer(String url) {
@@ -1563,6 +1580,112 @@ public class WebRTCModule extends ReactContextBaseJavaModule {
             sb.setLength(sb.length() - 1);
         }
         return sb.toString();
+    }
+
+    /**
+     * Starts a call recording segment. Mirrors the iOS API: resolves null on success,
+     * rejects with "duplicate_id" / "no_sources" / "io_error".
+     */
+    @ReactMethod
+    public void startCallRecording(ReadableMap options, Promise promise) {
+        ThreadUtils.runOnExecutor(() -> {
+            String recordingId = options.hasKey("recordingId") ? options.getString("recordingId") : null;
+            String wavPath = options.hasKey("wavPath") ? options.getString("wavPath") : null;
+            String m4aPath = options.hasKey("m4aPath") ? options.getString("m4aPath") : null;
+            boolean includeMic = options.hasKey("includeMic") && options.getBoolean("includeMic");
+            ReadableArray remoteTrackIds = options.hasKey("remoteTrackIds") ? options.getArray("remoteTrackIds") : null;
+            ReadableArray peerConnectionIds =
+                    options.hasKey("peerConnectionIds") ? options.getArray("peerConnectionIds") : null;
+
+            if (recordingId == null || wavPath == null || m4aPath == null) {
+                promise.reject("io_error", "startCallRecording requires recordingId, wavPath and m4aPath");
+                return;
+            }
+
+            List<Pair<AudioTrack, Integer>> remoteAudioTracks =
+                    resolveRemoteAudioTracks(remoteTrackIds, peerConnectionIds);
+            mCallAudioRecordingManager.startRecording(
+                    recordingId, wavPath, m4aPath, includeMic, remoteAudioTracks, promise);
+        });
+    }
+
+    /**
+     * Stops a recording segment. Resolves { recordingId, filePath, durationMs, size } only
+     * after the .m4a finalize completes; rejects "not_found" / "encode_error".
+     */
+    @ReactMethod
+    public void stopCallRecording(String recordingId, Promise promise) {
+        ThreadUtils.runOnExecutor(() -> mCallAudioRecordingManager.stopRecording(recordingId, promise));
+    }
+
+    @ReactMethod
+    public void getActiveCallRecordings(Promise promise) {
+        ThreadUtils.runOnExecutor(() -> {
+            WritableArray ids = Arguments.createArray();
+            for (String recordingId : mCallAudioRecordingManager.getActiveRecordingIds()) {
+                ids.pushString(recordingId);
+            }
+            promise.resolve(ids);
+        });
+    }
+
+    @ReactMethod
+    public void finalizeOrphanRecording(String wavPath, String m4aPath, Promise promise) {
+        // Runs on the manager's encode executor; must not occupy the WebRTC executor.
+        mCallAudioRecordingManager.finalizeOrphanRecording(wavPath, m4aPath, promise);
+    }
+
+    /**
+     * Resolves remote audio tracks for call recording. The peer connection ids are hints:
+     * tracks are looked up there first, then by scanning every observer, so a stale hint
+     * cannot lose a track. Unresolvable ids are skipped (the recorder zero-pads); only a
+     * fully empty result makes the manager reject with "no_sources". Must run on the
+     * executor.
+     */
+    private List<Pair<AudioTrack, Integer>> resolveRemoteAudioTracks(
+            @Nullable ReadableArray trackIds, @Nullable ReadableArray pcIdHints) {
+        List<Pair<AudioTrack, Integer>> resolved = new ArrayList<>();
+        if (trackIds == null) {
+            return resolved;
+        }
+        for (int i = 0; i < trackIds.size(); i++) {
+            String trackId = trackIds.getString(i);
+            if (trackId == null) {
+                continue;
+            }
+            MediaStreamTrack track = null;
+            int ownerPcId = -1;
+            if (pcIdHints != null) {
+                for (int j = 0; j < pcIdHints.size() && track == null; j++) {
+                    int pcId = pcIdHints.getInt(j);
+                    PeerConnectionObserver pco = mPeerConnectionObservers.get(pcId);
+                    if (pco != null) {
+                        MediaStreamTrack candidate = pco.remoteTracks.get(trackId);
+                        if (candidate != null) {
+                            track = candidate;
+                            ownerPcId = pcId;
+                        }
+                    }
+                }
+            }
+            for (int j = 0; j < mPeerConnectionObservers.size() && track == null; j++) {
+                MediaStreamTrack candidate = mPeerConnectionObservers.valueAt(j).remoteTracks.get(trackId);
+                if (candidate != null) {
+                    track = candidate;
+                    ownerPcId = mPeerConnectionObservers.keyAt(j);
+                }
+            }
+            if (track == null) {
+                Log.w(TAG, "startCallRecording: remote track not found, skipping: " + trackId);
+                continue;
+            }
+            if (!MediaStreamTrack.AUDIO_TRACK_KIND.equals(track.kind())) {
+                Log.w(TAG, "startCallRecording: track is not audio, skipping: " + trackId);
+                continue;
+            }
+            resolved.add(Pair.create((AudioTrack) track, ownerPcId));
+        }
+        return resolved;
     }
 
     @ReactMethod

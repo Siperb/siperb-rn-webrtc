@@ -65,11 +65,19 @@ class PeerConnectionObserver implements PeerConnection.Observer {
     void close() {
         Log.d(TAG, "PeerConnection.close() for " + id);
 
+        // Detach any call-recording sinks from this connection's remote tracks before
+        // teardown starts: a sink attached to (or removed from) a disposed track crashes.
+        // Affected recorders keep running zero-padded until JS stops them.
+        webRTCModule.getCallAudioRecordingManager().detachSinksForPeerConnection(id);
+
         peerConnection.close();
     }
 
     void dispose() {
         Log.d(TAG, "PeerConnection.dispose() for " + id);
+
+        // Defensive re-detach for any path that disposes without close(); no-op otherwise.
+        webRTCModule.getCallAudioRecordingManager().detachSinksForPeerConnection(id);
 
         // Remove video track adapters
         for (MediaStreamTrack track : this.remoteTracks.values()) {

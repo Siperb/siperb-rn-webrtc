@@ -1,0 +1,129 @@
+package com.oney.WebRTCModule.audiorecorder;
+
+import java.io.File;
+import java.io.IOException;
+import java.io.RandomAccessFile;
+
+/**
+ * Streaming mono 48 kHz 16-bit PCM WAV writer.
+ *
+ * The canonical 44-byte header is written up front with zero-size placeholders so that a
+ * recording interrupted by a crash leaves a file whose true data size can be recovered from
+ * the file length alone (see {@link #salvage(File)}).
+ */
+final class WavFileWriter {
+    static final int HEADER_SIZE = 44;
+    static final int SAMPLE_RATE = 48000;
+
+    private final RandomAccessFile raf;
+    private long dataBytes;
+    private byte[] byteScratch = new byte[0];
+
+    WavFileWriter(File file) throws IOException {
+        raf = new RandomAccessFile(file, "rw");
+        raf.setLength(0);
+        raf.write(buildHeader(0));
+    }
+
+    /** Appends {@code count} 16-bit samples. Writer-thread only. */
+    void append(short[] samples, int count) throws IOException {
+        int bytes = count * 2;
+        if (byteScratch.length < bytes) {
+            byteScratch = new byte[bytes];
+        }
+        for (int i = 0; i < count; i++) {
+            byteScratch[i * 2] = (byte) (samples[i] & 0xff);
+            byteScratch[i * 2 + 1] = (byte) ((samples[i] >> 8) & 0xff);
+        }
+        raf.write(byteScratch, 0, bytes);
+        dataBytes += bytes;
+    }
+
+    /** Patches the RIFF/data chunk sizes and closes the file. */
+    void finalizeHeader() throws IOException {
+        try {
+            raf.seek(4);
+            writeIntLe(raf, (int) (36 + dataBytes));
+            raf.seek(40);
+            writeIntLe(raf, (int) dataBytes);
+        } finally {
+            raf.close();
+        }
+    }
+
+    /**
+     * Repairs a WAV whose header sizes were never patched (app killed mid-recording) by
+     * deriving the data size from the file length. Safe to run on an already-finalized file.
+     * Rejects files that don't have this writer's canonical header layout.
+     */
+    static void salvage(File file) throws IOException {
+        try (RandomAccessFile raf = new RandomAccessFile(file, "rw")) {
+            long length = raf.length();
+            if (length < HEADER_SIZE) {
+                throw new IOException("Not a salvageable WAV (shorter than header): " + file);
+            }
+            byte[] header = new byte[HEADER_SIZE];
+            raf.readFully(header);
+            if (!matches(header, 0, "RIFF") || !matches(header, 8, "WAVE") || !matches(header, 36, "data")) {
+                throw new IOException("Not a canonical recorder WAV: " + file);
+            }
+            long dataBytes = length - HEADER_SIZE;
+            raf.seek(4);
+            writeIntLe(raf, (int) (36 + dataBytes));
+            raf.seek(40);
+            writeIntLe(raf, (int) dataBytes);
+        }
+    }
+
+    private static byte[] buildHeader(int dataBytes) {
+        byte[] h = new byte[HEADER_SIZE];
+        putAscii(h, 0, "RIFF");
+        putIntLe(h, 4, 36 + dataBytes);
+        putAscii(h, 8, "WAVE");
+        putAscii(h, 12, "fmt ");
+        putIntLe(h, 16, 16); // fmt chunk size (PCM)
+        putShortLe(h, 20, (short) 1); // audio format: PCM
+        putShortLe(h, 22, (short) 1); // channels: mono
+        putIntLe(h, 24, SAMPLE_RATE);
+        putIntLe(h, 28, SAMPLE_RATE * 2); // byte rate
+        putShortLe(h, 32, (short) 2); // block align
+        putShortLe(h, 34, (short) 16); // bits per sample
+        putAscii(h, 36, "data");
+        putIntLe(h, 40, dataBytes);
+        return h;
+    }
+
+    private static boolean matches(byte[] buf, int offset, String ascii) {
+        for (int i = 0; i < ascii.length(); i++) {
+            if (buf[offset + i] != (byte) ascii.charAt(i)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static void putAscii(byte[] buf, int offset, String ascii) {
+        for (int i = 0; i < ascii.length(); i++) {
+            buf[offset + i] = (byte) ascii.charAt(i);
+        }
+    }
+
+    private static void putIntLe(byte[] buf, int offset, int v) {
+        buf[offset] = (byte) (v & 0xff);
+        buf[offset + 1] = (byte) ((v >> 8) & 0xff);
+        buf[offset + 2] = (byte) ((v >> 16) & 0xff);
+        buf[offset + 3] = (byte) ((v >> 24) & 0xff);
+    }
+
+    private static void putShortLe(byte[] buf, int offset, short v) {
+        buf[offset] = (byte) (v & 0xff);
+        buf[offset + 1] = (byte) ((v >> 8) & 0xff);
+    }
+
+    private static void writeIntLe(RandomAccessFile raf, int v) throws IOException {
+        raf.write(v & 0xff);
+        raf.write((v >> 8) & 0xff);
+        raf.write((v >> 16) & 0xff);
+        raf.write((v >> 24) & 0xff);
+    }
+}

@@ -23,6 +23,9 @@ const NATIVE_EVENTS = [
     'dataChannelDidChangeBufferedAmount',
     'mediaStreamTrackMuteChanged',
     'mediaStreamTrackEnded',
+    'audioRecordingStarted',
+    'audioRecordingStopped',
+    'audioRecordingError',
 ];
 
 const eventEmitter = new EventEmitter();
