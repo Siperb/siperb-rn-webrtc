@@ -1,0 +1,391 @@
+package com.oney.WebRTCModule.audio;
+
+import android.content.Context;
+import android.util.Log;
+
+import org.webrtc.AudioTrack;
+import org.webrtc.AudioTrackSink;
+import org.webrtc.ExternalAudioProcessingFactory;
+import org.webrtc.PeerConnectionFactory;
+import org.webrtc.VideoDecoderFactory;
+import org.webrtc.VideoEncoderFactory;
+import org.webrtc.audio.JavaAudioDeviceModule;
+
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.ShortBuffer;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * Wires the {@link ConferenceAudioBus} into WebRTC's actual audio paths.
+ *
+ * THE SHAPE, and why it is asymmetric. An AudioDeviceModule is set per
+ * PeerConnectionFactory and feeds every sender on it, and a PeerConnection belongs to its
+ * factory for life. One factory therefore means one outbound signal shared by every leg,
+ * while a three-way call needs two different ones. So:
+ *
+ *   - The HOST leg stays on the app's existing factory, and its outbound is written by
+ *     overwriting that factory's capture buffer. Safe only because it is the sole leg
+ *     there -- the moment two legs share a factory they share an outbound and one of them
+ *     hears itself.
+ *   - Each further leg is born on a factory of its own, whose capture buffer we overwrite
+ *     with that leg's mix.
+ *
+ * CAPTURE-POST, NOT THE PRE-APM HOOK, on the host factory. Anything written pre-APM is fed
+ * to the echo canceller as if the microphone had heard it, and because the other party is
+ * also in the render reference the AEC would subtract it straight back out.
+ *
+ * A REAL AudioRecord RUNS ON EVERY FACTORY, including the synthesised ones, and that is a
+ * device finding rather than a design choice: setUseAudioRecord(false) is inert on
+ * webrtc-sdk 125.6422.07 -- the buffer callback never fires at all, so nothing can be
+ * injected. Leaving the capture running and overwriting its buffer works. The cost is a
+ * microphone stream per leg that nobody listens to.
+ *
+ * IDLE-COST IS THE FIRST THING TO PROTECT. Both hooks sit in the path of every ordinary
+ * 1:1 call, so each returns on its first line when no conference is up, and the processing
+ * factory ships with both bypass flags set.
+ */
+public final class ConferenceMixManager {
+    private static final String TAG = "ConferenceMix";
+
+    private final Context context;
+    private final ConferenceAudioBus bus = ConferenceAudioBus.getInstance();
+
+    /** The leg carried by the app's main factory. Null when no conference is up. */
+    private volatile String hostLegId;
+
+    private ExternalAudioProcessingFactory mainAudioProcessing;
+
+    /** Per synthesised leg: its own factory, ADM, and the buffers its capture callback uses. */
+    private final Map<String, SyntheticLeg> synthetic = new LinkedHashMap<>();
+    /** Remote taps, by leg. */
+    private final Map<String, List<RemoteTap>> taps = new LinkedHashMap<>();
+    private final Object legLock = new Object();
+
+    public ConferenceMixManager(Context context) {
+        this.context = context;
+    }
+
+    // =====================================================================
+    // The main factory's hooks
+    // =====================================================================
+
+    /**
+     * The processing factory to hand the app's own PeerConnectionFactory.
+     *
+     * Must be installed at construction: a factory's processing is fixed when it is built,
+     * which is the same per-factory constraint that forces a second factory in the first
+     * place. Both paths start BYPASSED, so installing this changes nothing until a
+     * conference starts.
+     */
+    public ExternalAudioProcessingFactory buildMainAudioProcessing() {
+        mainAudioProcessing = new ExternalAudioProcessingFactory();
+        mainAudioProcessing.setBypassFlagForCapturePost(true);
+        mainAudioProcessing.setBypassFlagForRenderPre(true);
+        mainAudioProcessing.setCapturePostProcessing(new HostCaptureMixer());
+        return mainAudioProcessing;
+    }
+
+    /**
+     * Reads the post-AEC microphone onto the bus, then overwrites the same buffer with what
+     * the host leg should be sent.
+     *
+     * ONE CALLBACK, BOTH DIRECTIONS, and the order matters: the mic has to reach the bus
+     * before the mix is drawn, or the host's outbound is a frame behind and the first frame
+     * of every conference is missing us entirely.
+     */
+    private final class HostCaptureMixer implements ExternalAudioProcessingFactory.AudioProcessing {
+        private int sampleRate;
+        private int channels = 1;
+        private short[] io = new short[0];
+        private short[] scratch = new short[0];
+        private int[] accumulator = new int[0];
+
+        @Override
+        public void initialize(int sampleRateHz, int numChannels) {
+            sampleRate = sampleRateHz;
+            channels = Math.max(1, numChannels);
+        }
+
+        @Override
+        public void reset(int newRate) {
+            sampleRate = newRate;
+        }
+
+        @Override
+        public void process(int numBands, int numFrames, ByteBuffer buffer) {
+            final String legId = hostLegId;
+            if (legId == null || sampleRate <= 0 || numFrames <= 0) return;
+            // numBands > 1 means the APM split the signal into frequency bands and only the
+            // lowest carries the audible content. Mixing across bands is not meaningful, so
+            // decline rather than produce something subtly wrong.
+            if (numBands != 1) return;
+
+            final int total = numFrames * channels;
+            if (io.length < total) io = new short[total];
+            if (scratch.length < numFrames) scratch = new short[numFrames];
+            if (accumulator.length < numFrames) accumulator = new int[numFrames];
+
+            final ShortBuffer pcm = buffer.order(ByteOrder.nativeOrder()).asShortBuffer();
+            pcm.get(io, 0, Math.min(total, pcm.remaining()));
+
+            bus.pushMicrophone(io, total, sampleRate, channels);
+
+            if (!bus.pull(legId, accumulator, scratch, numFrames, io)) {
+                // Nothing to send but us, and we are already what is in the buffer. Leaving
+                // it untouched is both correct and cheaper than writing our own samples back.
+                return;
+            }
+
+            pcm.rewind();
+            for (int f = 0; f < numFrames; f++) {
+                final short s = scratch[f];
+                for (int c = 0; c < channels; c++) {
+                    pcm.put(f * channels + c, s);
+                }
+            }
+        }
+    }
+
+    // =====================================================================
+    // Synthesised legs
+    // =====================================================================
+
+    private final class SyntheticLeg implements JavaAudioDeviceModule.AudioBufferCallback {
+        final String legId;
+        /**
+         * Set AFTER construction, because the ADM needs this object as its callback before
+         * the factory that owns the ADM can exist. One instance serves both roles - two
+         * would mean the ADM calling back into an object the registry never sees.
+         */
+        PeerConnectionFactory factory;
+        private short[] frame = new short[0];
+        private short[] scratch = new short[0];
+        private int[] accumulator = new int[0];
+
+        SyntheticLeg(String legId) {
+            this.legId = legId;
+        }
+
+        /**
+         * Overwrite this leg's capture with its own mix.
+         *
+         * The buffer handed here is the SAME memory passed on to the encoder, which is what
+         * makes the write meaningful. Its contents on arrival are a real microphone we do
+         * not want and simply discard - see the class note on why the capture still runs.
+         */
+        @Override
+        public long onBuffer(ByteBuffer buffer, int audioFormat, int channelCount,
+                int sampleRate, int bytesRead, long captureTimeNs) {
+            if (channelCount <= 0 || sampleRate <= 0 || bytesRead <= 0) return captureTimeNs;
+
+            final int frames = bytesRead / (2 * channelCount);
+            if (frames <= 0) return captureTimeNs;
+            if (frame.length < frames) frame = new short[frames];
+            if (scratch.length < frames) scratch = new short[frames];
+            if (accumulator.length < frames) accumulator = new int[frames];
+
+            if (!bus.pull(legId, accumulator, frame, frames, scratch)) {
+                // Silence rather than the live microphone: this leg must never hear the room
+                // directly, only what the bus says it should.
+                java.util.Arrays.fill(frame, 0, frames, (short) 0);
+            }
+
+            final ShortBuffer pcm = buffer.order(ByteOrder.nativeOrder()).asShortBuffer();
+            for (int f = 0; f < frames; f++) {
+                for (int c = 0; c < channelCount; c++) {
+                    pcm.put(f * channelCount + c, frame[f]);
+                }
+            }
+            return captureTimeNs;
+        }
+    }
+
+    /**
+     * Build (or return) the factory a synthesised leg's PeerConnection must be created on.
+     *
+     * Called before the leg is dialled, because the factory is fixed at PeerConnection
+     * construction and can never be changed afterwards. This works only because a
+     * conference child is dialled AFTER the conference is requested; two calls that already
+     * exist cannot be merged, and the caller is expected to refuse that with a reason.
+     */
+    public PeerConnectionFactory factoryForLeg(
+            String legId, VideoEncoderFactory encoderFactory, VideoDecoderFactory decoderFactory) {
+        if (legId == null) return null;
+        synchronized (legLock) {
+            SyntheticLeg existing = synthetic.get(legId);
+            if (existing != null) return existing.factory;
+
+            bus.addLeg(legId);
+
+            SyntheticLeg leg = new SyntheticLeg(legId);
+            JavaAudioDeviceModule adm = JavaAudioDeviceModule.builder(context)
+                                                .setEnableVolumeLogger(false)
+                                                .setAudioBufferCallback(leg)
+                                                .createAudioDeviceModule();
+
+            PeerConnectionFactory factory = PeerConnectionFactory.builder()
+                                                    .setAudioDeviceModule(adm)
+                                                    .setVideoEncoderFactory(encoderFactory)
+                                                    .setVideoDecoderFactory(decoderFactory)
+                                                    .createPeerConnectionFactory();
+            // The factory owns the native ADM now, as the app's own factory does with its.
+            adm.release();
+
+            leg.factory = factory;
+            synthetic.put(legId, leg);
+            Log.i(TAG, "factoryForLeg: synthesised leg " + legId + " has its own factory");
+            return factory;
+        }
+    }
+
+    // =====================================================================
+    // Legs and taps
+    // =====================================================================
+
+    /**
+     * Put a leg on the bus and start tapping its remote audio.
+     *
+     * @param host true for the leg carried by the app's main factory. There can be only
+     *             one, because that factory has one outbound to overwrite.
+     */
+    public void attachLeg(String legId, List<AudioTrack> remoteTracks, boolean host) {
+        if (legId == null) return;
+        synchronized (legLock) {
+            bus.addLeg(legId);
+            if (host) {
+                hostLegId = legId;
+                setMainInjectionEnabled(true);
+            }
+
+            List<RemoteTap> existing = taps.get(legId);
+            if (existing == null) {
+                existing = new ArrayList<>();
+                taps.put(legId, existing);
+            }
+            if (remoteTracks != null) {
+                for (AudioTrack track : remoteTracks) {
+                    if (track == null) continue;
+                    RemoteTap tap = new RemoteTap(legId, track);
+                    tap.attach();
+                    existing.add(tap);
+                }
+            }
+            Log.i(TAG, "attachLeg: " + legId + (host ? " (host)" : "") + " taps=" + existing.size());
+        }
+    }
+
+    /** Take a leg off the bus, detach its taps, and dispose its factory if it had one. */
+    public void detachLeg(String legId) {
+        if (legId == null) return;
+        synchronized (legLock) {
+            List<RemoteTap> legTaps = taps.remove(legId);
+            if (legTaps != null) {
+                for (RemoteTap tap : legTaps) tap.detach();
+            }
+            SyntheticLeg leg = synthetic.remove(legId);
+            if (leg != null && leg.factory != null) leg.factory.dispose();
+
+            bus.removeLeg(legId);
+            if (legId.equals(hostLegId)) {
+                hostLegId = null;
+                setMainInjectionEnabled(false);
+            }
+            Log.i(TAG, "detachLeg: " + legId);
+        }
+    }
+
+    /** The conference is over. Idempotent, and safe to call when none was ever up. */
+    public void teardown() {
+        synchronized (legLock) {
+            for (String legId : new ArrayList<>(taps.keySet())) {
+                List<RemoteTap> legTaps = taps.get(legId);
+                if (legTaps != null) {
+                    for (RemoteTap tap : legTaps) tap.detach();
+                }
+            }
+            taps.clear();
+            for (SyntheticLeg leg : synthetic.values()) {
+                if (leg.factory != null) leg.factory.dispose();
+            }
+            synthetic.clear();
+            hostLegId = null;
+            setMainInjectionEnabled(false);
+            bus.clear();
+            Log.i(TAG, "teardown: conference audio released");
+        }
+    }
+
+    public List<String> legIds() {
+        return bus.legIds();
+    }
+
+    public void setMicMuted(boolean muted) {
+        bus.setMicMuted(muted);
+    }
+
+    /**
+     * Flip the main factory's capture injection.
+     *
+     * Bypassed means the callback is not invoked at all, which is what keeps an idle
+     * conference off the 1:1 path entirely rather than merely making it cheap.
+     */
+    private void setMainInjectionEnabled(boolean enabled) {
+        if (mainAudioProcessing == null) return;
+        mainAudioProcessing.setBypassFlagForCapturePost(!enabled);
+    }
+
+    /**
+     * One remote track feeding one leg's ring.
+     *
+     * onData runs on a WebRTC audio thread and the buffer is only valid for the duration of
+     * the callback, so it is copied out immediately.
+     */
+    private final class RemoteTap implements AudioTrackSink {
+        private final String legId;
+        private final AudioTrack track;
+        private short[] copy = new short[0];
+        private boolean warnedBadFormat;
+
+        RemoteTap(String legId, AudioTrack track) {
+            this.legId = legId;
+            this.track = track;
+        }
+
+        void attach() {
+            track.addSink(this);
+        }
+
+        void detach() {
+            try {
+                track.removeSink(this);
+            } catch (Throwable t) {
+                // A track disposed ahead of us is not an error worth surfacing: teardown
+                // ordering between the PeerConnection and this manager is not guaranteed.
+                Log.w(TAG, "RemoteTap.detach: " + t);
+            }
+        }
+
+        @Override
+        public void onData(ByteBuffer audioData, int bitsPerSample, int sampleRate,
+                int numberOfChannels, int numberOfFrames, long absoluteCaptureTimestampMs) {
+            if (bitsPerSample != 16) {
+                if (!warnedBadFormat) {
+                    warnedBadFormat = true;
+                    Log.w(TAG, "Unsupported remote sample size " + bitsPerSample + " bits; leg " + legId + " skipped");
+                }
+                return;
+            }
+            final ShortBuffer shorts = audioData.order(ByteOrder.LITTLE_ENDIAN).asShortBuffer();
+            final int total = Math.min(numberOfFrames * numberOfChannels, shorts.remaining());
+            if (total <= 0) return;
+            if (copy.length < total) copy = new short[total];
+            shorts.get(copy, 0, total);
+            bus.pushLeg(legId, copy, total, sampleRate, numberOfChannels);
+        }
+    }
+}

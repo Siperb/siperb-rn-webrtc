@@ -9,6 +9,7 @@ if (WebRTCModule === null) {
 }
 
 import CallRecorder, { type CallRecordingOptions, type CallRecordingResult } from './CallRecorder';
+import ConferenceMixer from './ConferenceMixer';
 import { setupNativeEvents } from './EventEmitter';
 import Logger from './Logger';
 import mediaDevices from './MediaDevices';
@@ -54,6 +55,7 @@ export {
     RTCErrorEvent,
     RTCAudioSession,
     CallRecorder,
+    ConferenceMixer,
     type CallRecordingOptions,
     type CallRecordingResult,
     MediaStream,

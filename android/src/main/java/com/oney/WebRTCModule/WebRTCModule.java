@@ -31,9 +31,16 @@ import java.security.MessageDigest;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import org.webrtc.*;
+import com.oney.WebRTCModule.audio.ConferenceMixManager;
+
+import org.webrtc.AudioSource;
+import org.webrtc.AudioTrack;
+import org.webrtc.ExternalAudioProcessingFactory;
+import org.webrtc.MediaConstraints;
 import org.webrtc.audio.AudioDeviceModule;
 import org.webrtc.audio.JavaAudioDeviceModule;
 
+import java.util.Collections;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -60,6 +67,12 @@ public class WebRTCModule extends ReactContextBaseJavaModule {
     private static final Map<String, RtcCertificatePem> mCertificates = new HashMap<>();
 
     private final GetUserMediaImpl getUserMediaImpl;
+
+    /**
+     * Conference audio. Inert until a leg is attached: the processing factory below ships
+     * with both paths BYPASSED, so an ordinary 1:1 call never enters it.
+     */
+    private final ConferenceMixManager mConferenceMixManager;
 
     public WebRTCModule(ReactApplicationContext reactContext) {
         super(reactContext);
@@ -116,8 +129,15 @@ public class WebRTCModule extends ReactContextBaseJavaModule {
         Log.d(TAG, "Using video encoder factory: " + encoderFactory.getClass().getCanonicalName());
         Log.d(TAG, "Using video decoder factory: " + decoderFactory.getClass().getCanonicalName());
 
+        mConferenceMixManager = new ConferenceMixManager(reactContext);
+
         mFactory = PeerConnectionFactory.builder()
                            .setAudioDeviceModule(adm)
+                           // Installed at CONSTRUCTION because a factory's audio processing is
+                           // fixed when it is built - the same per-factory constraint that makes
+                           // a conference need a second factory at all. Bypassed until a leg
+                           // attaches, so this line changes nothing for a plain call.
+                           .setAudioProcessingFactory(mConferenceMixManager.buildMainAudioProcessing())
                            .setVideoEncoderFactory(encoderFactory)
                            .setVideoDecoderFactory(decoderFactory)
                            .createPeerConnectionFactory();
@@ -422,7 +442,23 @@ public class WebRTCModule extends ReactContextBaseJavaModule {
             return (boolean) ThreadUtils
                     .submitToExecutor(() -> {
                         PeerConnectionObserver observer = new PeerConnectionObserver(this, id);
-                        PeerConnection peerConnection = mFactory.createPeerConnection(rtcConfiguration, observer);
+                        // WHICH FACTORY - and therefore which outbound audio this leg sends -
+                        // is decided HERE and can never be changed afterwards. A conference
+                        // child names its leg id in the configuration and is born on a factory
+                        // of its own; everything else uses the app's single factory.
+                        //
+                        // Read off the configuration map because Android passes unknown keys
+                        // straight through. iOS would need an explicit argument, since
+                        // RCTConvert drops keys it does not recognise.
+                        PeerConnectionFactory factory = mFactory;
+                        if (configuration != null && configuration.hasKey("siperbConferenceLegId")) {
+                            String legId = configuration.getString("siperbConferenceLegId");
+                            if (legId != null && !legId.isEmpty()) {
+                                factory = mConferenceMixManager.factoryForLeg(
+                                        legId, mVideoEncoderFactory, mVideoDecoderFactory);
+                            }
+                        }
+                        PeerConnection peerConnection = factory.createPeerConnection(rtcConfiguration, observer);
                         if (peerConnection == null) {
                             return false;
                         }
@@ -1699,5 +1735,108 @@ public class WebRTCModule extends ReactContextBaseJavaModule {
     @ReactMethod
     public void removeListeners(Integer count) {
         // Keep: Required for RN built in Event Emitter Calls.
+    }
+
+    // =====================================================================
+    // Conference audio
+    // =====================================================================
+
+    /**
+     * Put a leg on the conference bus and start tapping its remote audio.
+     *
+     * @param host true for the leg already carried by the app's main factory. Exactly one
+     *             leg can be the host, because that factory has a single outbound to
+     *             overwrite; every other leg needs a factory of its own, which is chosen
+     *             when its PeerConnection is created and cannot be changed afterwards.
+     */
+    @ReactMethod
+    public void conferenceAttachLeg(int pcId, String legId, boolean host, Promise promise) {
+        ThreadUtils.runOnExecutor(() -> {
+            PeerConnectionObserver pco = mPeerConnectionObservers.get(pcId);
+            if (pco == null) {
+                promise.reject("no_peerconnection", "No peer connection " + pcId);
+                return;
+            }
+            List<AudioTrack> remote = new ArrayList<>();
+            for (MediaStreamTrack track : pco.remoteTracks.values()) {
+                if (MediaStreamTrack.AUDIO_TRACK_KIND.equals(track.kind())) {
+                    remote.add((AudioTrack) track);
+                }
+            }
+            mConferenceMixManager.attachLeg(legId, remote, host);
+            promise.resolve(true);
+        });
+    }
+
+    /**
+     * Give a synthesised leg's PeerConnection a local audio track FROM ITS OWN FACTORY.
+     *
+     * Not getUserMedia, which always builds on the app's single factory: a track from the
+     * wrong factory does not crash, it silently sends the wrong audio, so the leg's own
+     * factory has to mint it.
+     */
+    @ReactMethod
+    public void conferenceAttachLegAudio(int pcId, String legId, Promise promise) {
+        try {
+            PeerConnectionFactory factory = mConferenceMixManager.factoryForLeg(
+                    legId, mVideoEncoderFactory, mVideoDecoderFactory);
+            if (factory == null) {
+                promise.reject("no_leg_factory", "No factory for leg " + legId);
+                return;
+            }
+            PeerConnectionObserver pco = mPeerConnectionObservers.get(pcId);
+            if (pco == null || pco.getPeerConnection() == null) {
+                promise.reject("no_peerconnection", "No peer connection " + pcId);
+                return;
+            }
+            ThreadUtils.submitToExecutor(() -> {
+                AudioSource source = factory.createAudioSource(new MediaConstraints());
+                AudioTrack track = factory.createAudioTrack("conference-" + legId, source);
+                pco.getPeerConnection().addTrack(track, Collections.singletonList("conference-" + legId));
+            }).get();
+            promise.resolve(true);
+        } catch (Throwable e) {
+            Log.e(TAG, "conferenceAttachLegAudio failed", e);
+            promise.reject("conference_attach_audio_failed", e.getMessage(), e);
+        }
+    }
+
+    /** Take one leg out of the mix. The rest of the conference carries on. */
+    @ReactMethod
+    public void conferenceDetachLeg(String legId, Promise promise) {
+        ThreadUtils.runOnExecutor(() -> {
+            mConferenceMixManager.detachLeg(legId);
+            promise.resolve(true);
+        });
+    }
+
+    /** The conference is over. Idempotent, and safe when none was ever up. */
+    @ReactMethod
+    public void conferenceTeardown(Promise promise) {
+        ThreadUtils.runOnExecutor(() -> {
+            mConferenceMixManager.teardown();
+            promise.resolve(true);
+        });
+    }
+
+    /**
+     * Mute inside a conference.
+     *
+     * On the bus rather than on the sender track, because in a conference the sender track
+     * is the MIX - muting it would mute everyone.
+     */
+    @ReactMethod
+    public void conferenceSetMicMuted(boolean muted, Promise promise) {
+        mConferenceMixManager.setMicMuted(muted);
+        promise.resolve(true);
+    }
+
+    @ReactMethod
+    public void conferenceGetLegs(Promise promise) {
+        WritableArray ids = Arguments.createArray();
+        for (String legId : mConferenceMixManager.legIds()) {
+            ids.pushString(legId);
+        }
+        promise.resolve(ids);
     }
 }
