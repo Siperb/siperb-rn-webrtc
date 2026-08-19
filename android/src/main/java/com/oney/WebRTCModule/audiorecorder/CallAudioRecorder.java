@@ -8,6 +8,8 @@ import android.util.Pair;
 
 import com.facebook.react.bridge.Promise;
 
+import com.oney.WebRTCModule.audio.AudioSource;
+
 import org.webrtc.AudioTrack;
 import org.webrtc.AudioTrackSink;
 
@@ -263,53 +265,13 @@ class CallAudioRecorder {
         }
     }
 
-    /**
-     * Producer-side state for one input: downmix to mono, resample to 48 kHz, write into
-     * the ring. push() runs on an audio thread, so scratch buffers are reused and the only
-     * locking is the ring's own.
-     */
-    abstract static class AudioSource {
-        final ShortRingBuffer ring = new ShortRingBuffer(RING_CAPACITY);
-        private final LinearResampler resampler = new LinearResampler(SAMPLE_RATE);
-        private short[] monoScratch = new short[0];
-        private short[] resampleScratch = new short[0];
 
-        final void push(short[] interleaved, int totalSamples, int sampleRate, int channels) {
-            if (channels <= 0 || sampleRate <= 0 || totalSamples < channels) {
-                return;
-            }
-            int frames = totalSamples / channels;
-            short[] mono;
-            if (channels == 1) {
-                mono = interleaved;
-            } else {
-                if (monoScratch.length < frames) {
-                    monoScratch = new short[frames];
-                }
-                for (int f = 0; f < frames; f++) {
-                    int sum = 0;
-                    int base = f * channels;
-                    for (int c = 0; c < channels; c++) {
-                        sum += interleaved[base + c];
-                    }
-                    monoScratch[f] = (short) (sum / channels);
-                }
-                mono = monoScratch;
-            }
-            if (sampleRate == SAMPLE_RATE) {
-                ring.write(mono, 0, frames);
-                return;
-            }
-            int needed = resampler.maxOutput(frames, sampleRate);
-            if (resampleScratch.length < needed) {
-                resampleScratch = new short[needed];
-            }
-            int produced = resampler.resample(mono, frames, sampleRate, resampleScratch);
-            ring.write(resampleScratch, 0, produced);
+
+    static final class MicSource extends AudioSource {
+        MicSource() {
+            super(SAMPLE_RATE, RING_CAPACITY);
         }
     }
-
-    static final class MicSource extends AudioSource {}
 
     /**
      * One remote-track tap. onData runs on a WebRTC audio thread and the buffer is only
@@ -323,6 +285,7 @@ class CallAudioRecorder {
         private boolean warnedBadFormat;
 
         RemoteSource(AudioTrack track, int peerConnectionId) {
+            super(SAMPLE_RATE, RING_CAPACITY);
             this.track = track;
             this.peerConnectionId = peerConnectionId;
         }
@@ -369,106 +332,7 @@ class CallAudioRecorder {
         }
     }
 
-    /**
-     * Bounded mono sample ring; oldest samples are dropped on overflow. Producer is an
-     * audio thread, consumer is the writer thread; all state guarded by this.
-     */
-    static final class ShortRingBuffer {
-        private final short[] buf;
-        private int head; // next read index
-        private int size;
 
-        ShortRingBuffer(int capacity) {
-            buf = new short[capacity];
-        }
 
-        synchronized void write(short[] src, int off, int len) {
-            int cap = buf.length;
-            if (len >= cap) {
-                // Keep only the newest full window.
-                off += len - cap;
-                len = cap;
-                head = 0;
-                size = 0;
-            }
-            int overflow = size + len - cap;
-            if (overflow > 0) {
-                head = (head + overflow) % cap;
-                size -= overflow;
-            }
-            int tail = (head + size) % cap;
-            int first = Math.min(len, cap - tail);
-            System.arraycopy(src, off, buf, tail, first);
-            if (first < len) {
-                System.arraycopy(src, off + first, buf, 0, len - first);
-            }
-            size += len;
-        }
 
-        synchronized int read(short[] dst, int off, int len) {
-            int n = Math.min(len, size);
-            int first = Math.min(n, buf.length - head);
-            System.arraycopy(buf, head, dst, off, first);
-            if (first < n) {
-                System.arraycopy(buf, 0, dst, off + first, n - first);
-            }
-            head = (head + n) % buf.length;
-            size -= n;
-            return n;
-        }
-
-        synchronized int available() {
-            return size;
-        }
-    }
-
-    /**
-     * Stateful linear-interpolation resampler to 48 kHz. Keeps the previous input sample
-     * for continuity across pushes and resets when the input rate changes (e.g. the mic
-     * dropping to 16 kHz on a Bluetooth SCO route).
-     */
-    static final class LinearResampler {
-        private final int outRate;
-        private int inRate = -1;
-        private short prev;
-        private boolean hasPrev;
-        private double pos; // next output position on the input timeline; 0 == prev sample
-
-        LinearResampler(int outRate) {
-            this.outRate = outRate;
-        }
-
-        int maxOutput(int frames, int sampleRate) {
-            return (int) ((long) (frames + 1) * outRate / sampleRate) + 2;
-        }
-
-        int resample(short[] in, int frames, int sampleRate, short[] out) {
-            if (frames <= 0) {
-                return 0;
-            }
-            if (sampleRate != inRate) {
-                inRate = sampleRate;
-                hasPrev = false;
-            }
-            if (!hasPrev) {
-                prev = in[0];
-                hasPrev = true;
-                pos = 0;
-            }
-            double step = (double) inRate / outRate;
-            int produced = 0;
-            // Input timeline: index 0 is prev, indices 1..frames are in[0..frames-1].
-            while (pos < frames) {
-                int i = (int) pos;
-                double frac = pos - i;
-                int s0 = (i == 0) ? prev : in[i - 1];
-                int s1 = in[i];
-                out[produced++] = (short) (s0 + frac * (s1 - s0));
-                pos += step;
-            }
-            pos -= frames;
-            prev = in[frames - 1];
-            return produced;
-        }
-    }
 }
