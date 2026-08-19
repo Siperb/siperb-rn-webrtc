@@ -21,10 +21,31 @@
 
 @implementation WebRTCModule (ConferenceSpike)
 
+/**
+ * The factory a conference leg must be built on.
+ *
+ * SPIKE VERSION: every named leg lands on the one synthetic factory, which is all a
+ * two-legged proof needs. The production version resolves per leg, exactly as Android's
+ * ConferenceMixManager.factoryForLeg does.
+ */
+- (RTCPeerConnectionFactory *)conferenceFactoryForLeg:(NSString *)legId {
+    RTCPeerConnectionFactory *factory = [SiperbConferenceSpike sharedSpike].syntheticFactory;
+    if (factory == nil) {
+        RCTLogWarn(@"[ConferenceSpike] leg %@ requested a factory but the spike is not started", legId);
+    }
+    return factory;
+}
+
 RCT_EXPORT_METHOD(spikeStart : (RCTPromiseResolveBlock)resolve reject : (RCTPromiseRejectBlock)reject) {
     BOOL ok = [[SiperbConferenceSpike sharedSpike] startWithEncoderFactory:self.encoderFactory
                                                            decoderFactory:self.decoderFactory];
     resolve(@(ok));
+}
+
+/** The one iOS answer that needs no call, no ICE and no audio. */
+RCT_EXPORT_METHOD(spikeAudioDeviceDiagnosis : (RCTPromiseResolveBlock)resolve reject : (RCTPromiseRejectBlock)
+                      reject) {
+    resolve([[SiperbConferenceSpike sharedSpike] audioDeviceDiagnosis:self.peerConnectionFactory]);
 }
 
 RCT_EXPORT_METHOD(spikeStop : (RCTPromiseResolveBlock)resolve reject : (RCTPromiseRejectBlock)reject) {

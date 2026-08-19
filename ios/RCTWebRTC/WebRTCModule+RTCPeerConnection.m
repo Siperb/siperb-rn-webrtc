@@ -94,15 +94,28 @@ int _transceiverNextId = 0;
  * in the same way (synchronous) since the peer connection needs to exist before.
  */
 RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD(peerConnectionInit : (RTCConfiguration *)
-                                           configuration objectID : (nonnull NSNumber *)objectID) {
+                                           configuration objectID : (nonnull NSNumber *)
+                                               objectID conferenceLegId : (nullable NSString *)conferenceLegId) {
     __block BOOL ret = YES;
 
     dispatch_sync(self.workerQueue, ^{
         RTCMediaConstraints *constraints = [[RTCMediaConstraints alloc] initWithMandatoryConstraints:nil
                                                                                  optionalConstraints:nil];
-        RTCPeerConnection *peerConnection = [self.peerConnectionFactory peerConnectionWithConfiguration:configuration
-                                                                                            constraints:constraints
-                                                                                               delegate:self];
+        // WHICH FACTORY - and so which audio device feeds this leg's outbound - is decided
+        // HERE and is fixed for the life of the connection. An EXPLICIT argument rather
+        // than a configuration key, because iOS takes a typed RTCConfiguration and
+        // RCTConvert silently drops anything it does not recognise; Android can read the
+        // key straight off its ReadableMap, but relying on that here would fail quietly.
+        RTCPeerConnectionFactory *factory = self.peerConnectionFactory;
+        if (conferenceLegId.length > 0) {
+            RTCPeerConnectionFactory *legFactory = [self conferenceFactoryForLeg:conferenceLegId];
+            if (legFactory != nil) {
+                factory = legFactory;
+            }
+        }
+        RTCPeerConnection *peerConnection = [factory peerConnectionWithConfiguration:configuration
+                                                                        constraints:constraints
+                                                                           delegate:self];
         if (peerConnection == nil) {
             ret = NO;
             return;

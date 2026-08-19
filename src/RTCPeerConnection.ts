@@ -166,7 +166,13 @@ export default class RTCPeerConnection extends EventTarget<RTCPeerConnectionEven
             }
         }
 
-        if (!WebRTCModule.peerConnectionInit(configuration, this._pcId)) {
+        // Conference legs are born on their own factory, and that choice can only be made
+        // at construction. Passed EXPLICITLY rather than left in `configuration`: iOS's
+        // RCTConvert drops unrecognised keys, so a config-only route works on Android and
+        // silently does nothing on iOS.
+        const conferenceLegId = (configuration as any)?.siperbConferenceLegId ?? null;
+
+        if (!WebRTCModule.peerConnectionInit(configuration, this._pcId, conferenceLegId)) {
             throw new Error('Failed to initialize PeerConnection, check the native logs!');
         }
 

@@ -42,4 +42,15 @@
  * "never produced a frame" from "produced and dropped". Android needed exactly this. */
 @property(nonatomic, readonly) NSUInteger captureCallbacks;
 
+/**
+ * Whether the second factory got its OWN audio device, or shares the app's.
+ *
+ * THE DECISIVE QUESTION FOR IOS, and it needs no call, no ICE and no audio to answer. On
+ * Android each JavaAudioDeviceModule opens its own AudioRecord, which is what lets two
+ * factories carry two different outbound signals. If iOS hands both factories the same
+ * device then there is only ever ONE capture stream, both legs share an outbound, and the
+ * whole asymmetric design fails to port -- no amount of buffer-writing can fix it.
+ */
+- (NSString *)audioDeviceDiagnosis:(RTCPeerConnectionFactory *)appFactory;
+
 @end

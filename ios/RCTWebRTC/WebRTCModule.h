@@ -38,6 +38,9 @@ static NSString *const kEventAudioRecordingError = @"audioRecordingError";
 @property(nonatomic, strong) RTCDefaultAudioProcessingModule *audioProcessingModule;
 
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, RTCPeerConnection *> *peerConnections;
+
+/** The factory a conference leg must be built on, or nil for the app's own. */
+- (RTCPeerConnectionFactory *)conferenceFactoryForLeg:(NSString *)legId;
 @property(nonatomic, strong) NSMutableDictionary<NSString *, RTCMediaStream *> *localStreams;
 @property(nonatomic, strong) NSMutableDictionary<NSString *, RTCMediaStreamTrack *> *localTracks;
 

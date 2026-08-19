@@ -78,6 +78,25 @@ static const double kToneAmplitude = 0.25;
     return YES;
 }
 
+- (NSString *)audioDeviceDiagnosis:(RTCPeerConnectionFactory *)appFactory {
+    if (_syntheticFactory == nil) {
+        return @"spike not started";
+    }
+    RTCAudioDeviceModule *appAdm = appFactory.audioDeviceModule;
+    RTCAudioDeviceModule *spikeAdm = _syntheticFactory.audioDeviceModule;
+
+    if (appAdm == nil || spikeAdm == nil) {
+        return [NSString stringWithFormat:@"audioDeviceModule unavailable (app=%@ spike=%@)",
+                                          appAdm ? @"yes" : @"nil", spikeAdm ? @"yes" : @"nil"];
+    }
+    const BOOL shared = (appAdm == spikeAdm);
+    return [NSString
+        stringWithFormat:@"factories=%p/%p adm=%p/%p SHARED=%@ -- %@", appFactory, _syntheticFactory,
+                         appAdm, spikeAdm, shared ? @"YES" : @"NO",
+                         shared ? @"one capture stream for both legs: the Android design does NOT port"
+                                : @"separate capture per factory: the Android design ports"];
+}
+
 - (void)stop {
     _syntheticFactory = nil;
     _audioProcessingModule = nil;

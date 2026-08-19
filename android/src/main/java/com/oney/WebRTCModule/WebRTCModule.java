@@ -435,7 +435,7 @@ public class WebRTCModule extends ReactContextBaseJavaModule {
     }
 
     @ReactMethod(isBlockingSynchronousMethod = true)
-    public boolean peerConnectionInit(ReadableMap configuration, int id) {
+    public boolean peerConnectionInit(ReadableMap configuration, int id, @Nullable String conferenceLegId) {
         PeerConnection.RTCConfiguration rtcConfiguration = parseRTCConfiguration(configuration);
 
         try {
@@ -451,12 +451,9 @@ public class WebRTCModule extends ReactContextBaseJavaModule {
                         // straight through. iOS would need an explicit argument, since
                         // RCTConvert drops keys it does not recognise.
                         PeerConnectionFactory factory = mFactory;
-                        if (configuration != null && configuration.hasKey("siperbConferenceLegId")) {
-                            String legId = configuration.getString("siperbConferenceLegId");
-                            if (legId != null && !legId.isEmpty()) {
-                                factory = mConferenceMixManager.factoryForLeg(
-                                        legId, mVideoEncoderFactory, mVideoDecoderFactory);
-                            }
+                        if (conferenceLegId != null && !conferenceLegId.isEmpty()) {
+                            factory = mConferenceMixManager.factoryForLeg(
+                                    conferenceLegId, mVideoEncoderFactory, mVideoDecoderFactory);
                         }
                         PeerConnection peerConnection = factory.createPeerConnection(rtcConfiguration, observer);
                         if (peerConnection == null) {
