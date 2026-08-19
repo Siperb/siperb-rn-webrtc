@@ -13,13 +13,18 @@ import java.io.InputStream;
 import java.nio.ByteBuffer;
 
 /**
- * Offline WAV (mono 48 kHz 16-bit) to AAC-LC .m4a encoder. Blocking; run it on a
+ * Offline WAV (48 kHz 16-bit, mono or stereo) to AAC-LC .m4a encoder. Blocking; run it on a
  * background executor, never on the WebRTC/module executor.
+ *
+ * The channel count comes from the WAV header rather than a constant, so salvaging a WAV
+ * written by an older mono build keeps working after the recorder switched to stereo.
  */
 final class AacEncoder {
     private static final String TAG = CallAudioRecordingManager.TAG;
 
-    private static final int CHANNELS = 1;
+    // 64 kbps holds for both layouts: each channel of a split recording carries one talker,
+    // and turn-taking leaves long stretches of near-silence the encoder spends almost
+    // nothing on. Raise it here if stereo speech is judged too soft.
     private static final int BIT_RATE = 64000;
     private static final long CODEC_TIMEOUT_US = 10000;
     private static final int PCM_CHUNK_BYTES = 8192;
@@ -46,6 +51,8 @@ final class AacEncoder {
         if (pcmBytes <= 0) {
             throw new IOException("WAV contains no audio data: " + wavFile);
         }
+        int channels = WavFileWriter.readChannels(wavFile);
+        int bytesPerFrame = channels * WavFileWriter.BYTES_PER_SAMPLE;
         if (m4aFile.exists() && !m4aFile.delete()) {
             throw new IOException("Cannot replace existing output file: " + m4aFile);
         }
@@ -58,7 +65,7 @@ final class AacEncoder {
             skipFully(in, WavFileWriter.HEADER_SIZE);
 
             MediaFormat format =
-                    MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, WavFileWriter.SAMPLE_RATE, CHANNELS);
+                    MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, WavFileWriter.SAMPLE_RATE, channels);
             format.setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC);
             format.setInteger(MediaFormat.KEY_BIT_RATE, BIT_RATE);
             format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, PCM_CHUNK_BYTES);
@@ -81,10 +88,13 @@ final class AacEncoder {
                     if (inIndex >= 0) {
                         ByteBuffer inBuf = codec.getInputBuffer(inIndex);
                         int max = Math.min(inBuf.capacity(), readBuf.length);
-                        int read = in.read(readBuf, 0, max);
+                        int read = readUpTo(in, readBuf, max - max % bytesPerFrame);
+                        // Whole frames only: a chunk boundary inside a stereo frame would
+                        // swap left and right for the entire remainder of the encode.
+                        read -= read % bytesPerFrame;
                         // Presentation time derived from PCM position keeps timestamps
                         // monotonic and exact regardless of chunking.
-                        long ptsUs = bytesQueued * 1_000_000L / (2L * WavFileWriter.SAMPLE_RATE);
+                        long ptsUs = bytesQueued * 1_000_000L / ((long) bytesPerFrame * WavFileWriter.SAMPLE_RATE);
                         if (read <= 0) {
                             codec.queueInputBuffer(inIndex, 0, 0, ptsUs, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
                             inputDone = true;
@@ -163,8 +173,24 @@ final class AacEncoder {
             }
         }
 
-        long durationMs = (pcmBytes / 2) * 1000L / WavFileWriter.SAMPLE_RATE;
+        long durationMs = (pcmBytes / bytesPerFrame) * 1000L / WavFileWriter.SAMPLE_RATE;
         return new Result(durationMs, m4aFile.length());
+    }
+
+    /**
+     * Reads until {@code max} bytes are buffered or the stream ends. A file only short-reads
+     * at EOF, so this leaves at most one trailing partial frame, which the caller drops.
+     */
+    private static int readUpTo(InputStream in, byte[] buf, int max) throws IOException {
+        int total = 0;
+        while (total < max) {
+            int read = in.read(buf, total, max - total);
+            if (read <= 0) {
+                break;
+            }
+            total += read;
+        }
+        return total;
     }
 
     private static void skipFully(InputStream in, long bytes) throws IOException {

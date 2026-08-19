@@ -11,9 +11,14 @@ typedef NS_ENUM(NSInteger, CallRecordingErrorCode) {
 /**
  * Records one call segment: real-time audio threads push mono int16 PCM into per-source
  * ring buffers, a 10 ms writer clock mixes them (zero-padding underruns) and streams a
- * mono 48 kHz 16-bit WAV to disk, and stop finalizes the WAV into an AAC .m4a. The WAV
- * is streamed so a crash mid-recording loses at most the buffered tail; the orphaned
- * file is salvageable via finalizeWavAtPath:toM4aPath:error:.
+ * 48 kHz 16-bit WAV to disk, and stop finalizes the WAV into an AAC .m4a. The WAV is
+ * streamed so a crash mid-recording loses at most the buffered tail; the orphaned file
+ * is salvageable via finalizeWavAtPath:toM4aPath:error:.
+ *
+ * Stereo recordings are CHANNEL-SPLIT, not true stereo — a SIP call carries no stereo
+ * material to capture. Left is us (the mic), right is every remote party summed into one
+ * side, matching the web recorder's CHANNEL_LOCAL / CHANNEL_REMOTE split so a recording
+ * means the same thing whichever client made it. Mono sums everything into one channel.
  */
 @interface CallAudioRecorder : NSObject
 
@@ -21,11 +26,13 @@ typedef NS_ENUM(NSInteger, CallRecordingErrorCode) {
 @property(nonatomic, copy, readonly) NSString *wavPath;
 @property(nonatomic, copy, readonly) NSString *m4aPath;
 @property(nonatomic, readonly) BOOL includesMic;
+@property(nonatomic, readonly) BOOL stereo;
 
 - (instancetype)initWithRecordingId:(NSString *)recordingId
                             wavPath:(NSString *)wavPath
                             m4aPath:(NSString *)m4aPath
                         includesMic:(BOOL)includesMic
+                             stereo:(BOOL)stereo
                   remoteSourceCount:(NSUInteger)remoteSourceCount;
 
 /** Opens the WAV file and starts the writer clock. NO + error (CallRecordingErrorIO) on failure. */

@@ -37,6 +37,7 @@
                      wavPath:(NSString *)wavPath
                      m4aPath:(NSString *)m4aPath
                   includeMic:(BOOL)includeMic
+                      stereo:(BOOL)stereo
                 remoteTracks:(NSArray<RTCAudioTrack *> *)remoteTracks
                        error:(NSError **)error;
 

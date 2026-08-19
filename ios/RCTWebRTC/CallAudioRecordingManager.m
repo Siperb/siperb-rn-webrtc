@@ -72,6 +72,7 @@
                      wavPath:(NSString *)wavPath
                      m4aPath:(NSString *)m4aPath
                   includeMic:(BOOL)includeMic
+                      stereo:(BOOL)stereo
                 remoteTracks:(NSArray<RTCAudioTrack *> *)remoteTracks
                        error:(NSError **)error {
     if ([self isRecordingActive:recordingId]) {
@@ -90,6 +91,7 @@
                                                                          wavPath:wavPath
                                                                          m4aPath:m4aPath
                                                                      includesMic:includeMic
+                                                                          stereo:stereo
                                                                remoteSourceCount:remoteTracks.count];
     if (![recorder start:error]) {
         return NO;

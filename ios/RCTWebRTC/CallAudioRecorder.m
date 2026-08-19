@@ -18,6 +18,7 @@ static const NSUInteger kMaxDrainTicks = 256;
 // enum (not static const) so these can size stack arrays without a VLA warning
 enum {
     kWavHeaderSize = 44,
+    kWavChannelsOffset = 22,  // fmt-chunk channel count, little-endian u16
     kResampleChunkCapacity = 4096,  // stack scratch for one resampled slice
 };
 
@@ -157,8 +158,20 @@ static void WriteLE16(uint8_t *bytes, uint16_t value) {
     bytes[1] = (value >> 8) & 0xFF;
 }
 
-/** Canonical 44-byte PCM header (mono, 48 kHz, 16-bit) with placeholder sizes. */
-static BOOL WriteWavHeader(FILE *file) {
+/** Saturating: overlapping loud sources clip rather than wrap. */
+static inline int16_t ClampToInt16(int32_t sample) {
+    if (sample > INT16_MAX) {
+        return INT16_MAX;
+    }
+    if (sample < INT16_MIN) {
+        return INT16_MIN;
+    }
+    return (int16_t)sample;
+}
+
+/** Canonical 44-byte PCM header (48 kHz, 16-bit, given channel count) with placeholder sizes. */
+static BOOL WriteWavHeader(FILE *file, uint16_t channels) {
+    const uint16_t blockAlign = channels * (uint16_t)sizeof(int16_t);
     uint8_t header[kWavHeaderSize];
     memcpy(header, "RIFF", 4);
     WriteLE32(header + 4, 0);  // placeholder, patched on finalize
@@ -166,11 +179,11 @@ static BOOL WriteWavHeader(FILE *file) {
     memcpy(header + 12, "fmt ", 4);
     WriteLE32(header + 16, 16);
     WriteLE16(header + 20, 1);  // PCM
-    WriteLE16(header + 22, 1);  // mono
+    WriteLE16(header + kWavChannelsOffset, channels);
     WriteLE32(header + 24, (uint32_t)kTargetSampleRate);
-    WriteLE32(header + 28, (uint32_t)kTargetSampleRate * 2);  // byte rate
-    WriteLE16(header + 32, 2);                                // block align
-    WriteLE16(header + 34, 16);                               // bits per sample
+    WriteLE32(header + 28, (uint32_t)kTargetSampleRate * blockAlign);  // byte rate
+    WriteLE16(header + 32, blockAlign);
+    WriteLE16(header + 34, 16);  // bits per sample
     memcpy(header + 36, "data", 4);
     WriteLE32(header + 40, 0);  // placeholder, patched on finalize
     return fwrite(header, 1, kWavHeaderSize, file) == kWavHeaderSize;
@@ -208,7 +221,19 @@ static BOOL PatchWavHeaderFromLength(NSString *wavPath, NSError **error) {
         if (fseek(file, 36, SEEK_SET) != 0 || fread(magic, 1, 4, file) != 4 || memcmp(magic, "data", 4) != 0) {
             break;  // not our canonical 44-byte layout
         }
-        uint32_t dataBytes = (uint32_t)((length - kWavHeaderSize) & ~1L);  // whole int16 samples only
+        // Whole FRAMES only. A stereo file cut on a sample boundary keeps a trailing lone
+        // sample, which shifts channel parity and swaps left and right for the whole encode.
+        // The count comes from the header, so a mono WAV from an older build still salvages.
+        uint8_t channelBytes[2];
+        if (fseek(file, kWavChannelsOffset, SEEK_SET) != 0 || fread(channelBytes, 1, 2, file) != 2) {
+            break;
+        }
+        const long channels = (long)(channelBytes[0] | (channelBytes[1] << 8));
+        if (channels != 1 && channels != 2) {
+            break;
+        }
+        const long frameBytes = channels * (long)sizeof(int16_t);
+        uint32_t dataBytes = (uint32_t)((length - kWavHeaderSize) - ((length - kWavHeaderSize) % frameBytes));
         uint8_t sizeBytes[4];
         WriteLE32(sizeBytes, 36 + dataBytes);
         if (fseek(file, 4, SEEK_SET) != 0 || fwrite(sizeBytes, 1, 4, file) != 4) {
@@ -239,8 +264,10 @@ static BOOL PatchWavHeaderFromLength(NSString *wavPath, NSError **error) {
     NSUInteger _tickCount;
     BOOL _stopped;  // writer-queue confined
     int16_t *_pullBuffer;
-    int32_t *_mixBuffer;
+    int32_t *_mixBuffer;   // left in stereo, the single mix in mono
+    int32_t *_mixRight;    // NULL in mono
     int16_t *_writeBuffer;
+    NSUInteger _samplesPerWrite;  // interleaved shorts per tick
     BOOL _writeFailureLogged;
 }
 
@@ -248,6 +275,7 @@ static BOOL PatchWavHeaderFromLength(NSString *wavPath, NSError **error) {
                             wavPath:(NSString *)wavPath
                             m4aPath:(NSString *)m4aPath
                         includesMic:(BOOL)includesMic
+                             stereo:(BOOL)stereo
                   remoteSourceCount:(NSUInteger)remoteSourceCount {
     self = [super init];
     if (self) {
@@ -255,6 +283,7 @@ static BOOL PatchWavHeaderFromLength(NSString *wavPath, NSError **error) {
         _wavPath = [wavPath copy];
         _m4aPath = [m4aPath copy];
         _includesMic = includesMic;
+        _stereo = stereo;
         NSUInteger sourceCount = remoteSourceCount + (includesMic ? 1 : 0);
         NSMutableArray<CallRecorderAudioSource *> *sources = [NSMutableArray arrayWithCapacity:sourceCount];
         for (NSUInteger i = 0; i < sourceCount; i++) {
@@ -265,9 +294,11 @@ static BOOL PatchWavHeaderFromLength(NSString *wavPath, NSError **error) {
         dispatch_queue_attr_t attributes =
             dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, -1);
         _writerQueue = dispatch_queue_create("CallAudioRecorder.writer", attributes);
+        _samplesPerWrite = kSamplesPerTick * (stereo ? 2 : 1);
         _pullBuffer = malloc(kSamplesPerTick * sizeof(int16_t));
         _mixBuffer = malloc(kSamplesPerTick * sizeof(int32_t));
-        _writeBuffer = malloc(kSamplesPerTick * sizeof(int16_t));
+        _mixRight = stereo ? malloc(kSamplesPerTick * sizeof(int32_t)) : NULL;
+        _writeBuffer = malloc(_samplesPerWrite * sizeof(int16_t));
     }
     return self;
 }
@@ -281,12 +312,13 @@ static BOOL PatchWavHeaderFromLength(NSString *wavPath, NSError **error) {
     }
     free(_pullBuffer);
     free(_mixBuffer);
+    free(_mixRight);
     free(_writeBuffer);
 }
 
 - (BOOL)start:(NSError **)error {
     _file = fopen(_wavPath.UTF8String, "wb");
-    if (_file == NULL || !WriteWavHeader(_file)) {
+    if (_file == NULL || !WriteWavHeader(_file, _stereo ? 2 : 1)) {
         if (_file != NULL) {
             fclose(_file);
             _file = NULL;
@@ -342,22 +374,31 @@ static BOOL PatchWavHeaderFromLength(NSString *wavPath, NSError **error) {
 /** Pulls one 10 ms frame from every source (zero-padding underruns), mixes and appends. */
 - (void)writeOneTickFrame {
     memset(_mixBuffer, 0, kSamplesPerTick * sizeof(int32_t));
+    if (_mixRight != NULL) {
+        memset(_mixRight, 0, kSamplesPerTick * sizeof(int32_t));
+    }
+    NSUInteger sourceIndex = 0;
     for (CallRecorderAudioSource *source in _sources) {
         NSUInteger pulled = [source pullSamples:_pullBuffer count:kSamplesPerTick];
+        // Mono sums every source into one channel; stereo puts the mic left and sums every
+        // remote party onto the right, so the far side is one mixed channel on a conference.
+        int32_t *target = (_mixRight != NULL && sourceIndex != _micSourceIndex) ? _mixRight : _mixBuffer;
         for (NSUInteger i = 0; i < pulled; i++) {
-            _mixBuffer[i] += _pullBuffer[i];
+            target[i] += _pullBuffer[i];
+        }
+        sourceIndex++;
+    }
+    if (_mixRight != NULL) {
+        for (NSUInteger i = 0; i < kSamplesPerTick; i++) {
+            _writeBuffer[i * 2] = ClampToInt16(_mixBuffer[i]);
+            _writeBuffer[i * 2 + 1] = ClampToInt16(_mixRight[i]);
+        }
+    } else {
+        for (NSUInteger i = 0; i < kSamplesPerTick; i++) {
+            _writeBuffer[i] = ClampToInt16(_mixBuffer[i]);
         }
     }
-    for (NSUInteger i = 0; i < kSamplesPerTick; i++) {
-        int32_t sample = _mixBuffer[i];  // saturating sum keeps overlapping loud sources clip-safe
-        if (sample > INT16_MAX) {
-            sample = INT16_MAX;
-        } else if (sample < INT16_MIN) {
-            sample = INT16_MIN;
-        }
-        _writeBuffer[i] = (int16_t)sample;
-    }
-    if (fwrite(_writeBuffer, sizeof(int16_t), kSamplesPerTick, _file) != kSamplesPerTick) {
+    if (fwrite(_writeBuffer, sizeof(int16_t), _samplesPerWrite, _file) != _samplesPerWrite) {
         if (!_writeFailureLogged) {
             _writeFailureLogged = YES;  // log once; a full disk would otherwise spam every 10 ms
             RCTLogWarn(@"[CallRecording] WAV write failed for %@ (disk full?)", _recordingId);

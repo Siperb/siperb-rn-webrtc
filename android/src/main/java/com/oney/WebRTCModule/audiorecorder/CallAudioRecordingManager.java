@@ -87,7 +87,7 @@ public class CallAudioRecordingManager {
     }
 
     public void startRecording(String recordingId, String wavPath, String m4aPath, boolean includeMic,
-            List<Pair<AudioTrack, Integer>> remoteTracks, Promise promise) {
+            boolean stereo, List<Pair<AudioTrack, Integer>> remoteTracks, Promise promise) {
         synchronized (lock) {
             if (recorders.containsKey(recordingId)) {
                 promise.reject("duplicate_id", "Recording already active: " + recordingId);
@@ -105,7 +105,7 @@ public class CallAudioRecordingManager {
         }
         CallAudioRecorder recorder;
         try {
-            recorder = new CallAudioRecorder(this, recordingId, wavPath, m4aPath, micWanted, remoteTracks);
+            recorder = new CallAudioRecorder(this, recordingId, wavPath, m4aPath, micWanted, stereo, remoteTracks);
         } catch (IOException e) {
             Log.e(TAG, "Failed to open WAV for " + recordingId, e);
             promise.reject("io_error", "Cannot open recording file: " + e.getMessage());

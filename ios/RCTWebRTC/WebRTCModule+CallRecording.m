@@ -56,6 +56,9 @@ RCT_EXPORT_METHOD(startCallRecording : (NSDictionary *)options
     NSString *wavPath = [RCTConvert NSString:options[@"wavPath"]];
     NSString *m4aPath = [RCTConvert NSString:options[@"m4aPath"]];
     BOOL includeMic = [RCTConvert BOOL:options[@"includeMic"]];
+    // Absent means mono: the caller owns the product decision, and an older caller that
+    // never sends the flag keeps the layout it was written against.
+    BOOL stereo = [RCTConvert BOOL:options[@"stereo"]];
     NSArray<NSString *> *remoteTrackIds = [RCTConvert NSStringArray:options[@"remoteTrackIds"]];
     NSArray<NSNumber *> *peerConnectionIds = [RCTConvert NSNumberArray:options[@"peerConnectionIds"]];
     if (recordingId.length == 0 || wavPath.length == 0 || m4aPath.length == 0) {
@@ -93,14 +96,16 @@ RCT_EXPORT_METHOD(startCallRecording : (NSDictionary *)options
                                wavPath:wavPath
                                m4aPath:m4aPath
                             includeMic:wantMic
+                                stereo:stereo
                           remoteTracks:tracks
                                  error:&error]) {
         reject(RejectionCodeForError(error), error.localizedDescription ?: @"Failed to start recording", error);
         return;
     }
-    RCTLogInfo(@"[CallRecording] Started %@ (mic: %d, remote sources: %lu)",
+    RCTLogInfo(@"[CallRecording] Started %@ (mic: %d, stereo: %d, remote sources: %lu)",
                recordingId,
                wantMic,
+               stereo,
                (unsigned long)tracks.count);
     [self sendEventWithName:kEventAudioRecordingStarted body:@{@"recordingId" : recordingId}];
     resolve(nil);

@@ -22,7 +22,13 @@ import java.util.List;
 
 /**
  * One recording segment: mixes an optional mic source and one source per remote audio
- * track into a mono 48 kHz 16-bit WAV, then encodes it to .m4a on stop.
+ * track into a 48 kHz 16-bit WAV, then encodes it to .m4a on stop.
+ *
+ * Stereo recordings are CHANNEL-SPLIT, not true stereo — there is no stereo material in a
+ * SIP call to capture. Left carries us (the mic), right carries every remote party summed
+ * together, matching the web recorder's CHANNEL_LOCAL / CHANNEL_REMOTE split so a recording
+ * means the same thing whichever client made it. On a conference the far side is one mixed
+ * channel, not one channel per participant. Mono sums everything into a single channel.
  *
  * Audio callbacks (mic dispatcher / track sinks) only copy into per-source ring buffers;
  * all file IO happens on this recorder's writer HandlerThread and the manager's encode
@@ -46,6 +52,7 @@ class CallAudioRecorder {
     private final File m4aFile;
     private final MicSource micSource; // null when mic capture is not part of this recording
     private final List<RemoteSource> remoteSources = new ArrayList<>();
+    private final boolean stereo;
     private final WavFileWriter wav;
     private final HandlerThread writerThread;
     private final Runnable tickRunnable = this::tick;
@@ -55,14 +62,18 @@ class CallAudioRecorder {
     private volatile boolean stopping;
     private boolean writeFailed; // writer thread only
 
-    // Mix scratch, writer thread only.
+    // Mix scratch, writer thread only. mixRight stays unused in mono.
     private final int[] mixAccum = new int[SAMPLES_PER_TICK];
+    private final int[] mixRight;
     private final short[] pullScratch = new short[SAMPLES_PER_TICK];
-    private final short[] mixOut = new short[SAMPLES_PER_TICK];
+    private final short[] mixOut;
 
     CallAudioRecorder(CallAudioRecordingManager manager, String recordingId, String wavPath, String m4aPath,
-            boolean includeMic, List<Pair<AudioTrack, Integer>> remoteTracks) throws IOException {
+            boolean includeMic, boolean stereo, List<Pair<AudioTrack, Integer>> remoteTracks) throws IOException {
         this.manager = manager;
+        this.stereo = stereo;
+        this.mixRight = stereo ? new int[SAMPLES_PER_TICK] : null;
+        this.mixOut = new short[stereo ? SAMPLES_PER_TICK * 2 : SAMPLES_PER_TICK];
         this.recordingId = recordingId;
         this.wavFile = new File(wavPath);
         this.m4aFile = new File(m4aPath);
@@ -70,7 +81,7 @@ class CallAudioRecorder {
         if (parent != null) {
             parent.mkdirs();
         }
-        this.wav = new WavFileWriter(wavFile);
+        this.wav = new WavFileWriter(wavFile, stereo ? 2 : 1);
         this.micSource = includeMic ? new MicSource() : null;
         for (Pair<AudioTrack, Integer> entry : remoteTracks) {
             remoteSources.add(new RemoteSource(entry.first, entry.second));
@@ -210,27 +221,45 @@ class CallAudioRecorder {
         return max;
     }
 
+    /** {@code samples} is a per-source frame count; stereo writes twice that many shorts. */
     private void mixAndAppend(int samples) throws IOException {
         Arrays.fill(mixAccum, 0, samples, 0);
-        accumulate(micSource, samples);
+        if (stereo) {
+            Arrays.fill(mixRight, 0, samples, 0);
+            accumulate(micSource, samples, mixAccum);
+            for (RemoteSource source : remoteSources) {
+                accumulate(source, samples, mixRight);
+            }
+            for (int i = 0; i < samples; i++) {
+                mixOut[i * 2] = clamp(mixAccum[i]);
+                mixOut[i * 2 + 1] = clamp(mixRight[i]);
+            }
+            wav.append(mixOut, samples * 2);
+            return;
+        }
+        accumulate(micSource, samples, mixAccum);
         for (RemoteSource source : remoteSources) {
-            accumulate(source, samples);
+            accumulate(source, samples, mixAccum);
         }
         for (int i = 0; i < samples; i++) {
-            int v = mixAccum[i];
-            mixOut[i] = v > Short.MAX_VALUE ? Short.MAX_VALUE : (v < Short.MIN_VALUE ? Short.MIN_VALUE : (short) v);
+            mixOut[i] = clamp(mixAccum[i]);
         }
         wav.append(mixOut, samples);
     }
 
-    private void accumulate(AudioSource source, int samples) {
+    /** Saturating: overlapping loud sources clip rather than wrap. */
+    private static short clamp(int v) {
+        return v > Short.MAX_VALUE ? Short.MAX_VALUE : (v < Short.MIN_VALUE ? Short.MIN_VALUE : (short) v);
+    }
+
+    private void accumulate(AudioSource source, int samples, int[] target) {
         if (source == null) {
             return;
         }
         int n = source.ring.read(pullScratch, 0, samples);
         // Samples beyond n stay zero: sources with insufficient data are zero-padded.
         for (int i = 0; i < n; i++) {
-            mixAccum[i] += pullScratch[i];
+            target[i] += pullScratch[i];
         }
     }
 

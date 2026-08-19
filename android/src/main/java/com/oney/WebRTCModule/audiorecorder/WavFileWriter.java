@@ -5,27 +5,36 @@ import java.io.IOException;
 import java.io.RandomAccessFile;
 
 /**
- * Streaming mono 48 kHz 16-bit PCM WAV writer.
+ * Streaming 48 kHz 16-bit PCM WAV writer, mono or stereo.
  *
  * The canonical 44-byte header is written up front with zero-size placeholders so that a
  * recording interrupted by a crash leaves a file whose true data size can be recovered from
  * the file length alone (see {@link #salvage(File)}).
+ *
+ * Only the header knows the channel count: {@link #append} takes already-interleaved
+ * samples, so the mixer decides the layout and the encoder reads it back with
+ * {@link #readChannels(File)}.
  */
 final class WavFileWriter {
     static final int HEADER_SIZE = 44;
     static final int SAMPLE_RATE = 48000;
+    static final int BYTES_PER_SAMPLE = 2;
+    /** fmt-chunk channel-count field, little-endian u16. */
+    private static final int CHANNELS_OFFSET = 22;
 
     private final RandomAccessFile raf;
+    private final int channels;
     private long dataBytes;
     private byte[] byteScratch = new byte[0];
 
-    WavFileWriter(File file) throws IOException {
+    WavFileWriter(File file, int channels) throws IOException {
+        this.channels = channels;
         raf = new RandomAccessFile(file, "rw");
         raf.setLength(0);
-        raf.write(buildHeader(0));
+        raf.write(buildHeader(channels, 0));
     }
 
-    /** Appends {@code count} 16-bit samples. Writer-thread only. */
+    /** Appends {@code count} 16-bit samples, already interleaved. Writer-thread only. */
     void append(short[] samples, int count) throws IOException {
         int bytes = count * 2;
         if (byteScratch.length < bytes) {
@@ -67,7 +76,15 @@ final class WavFileWriter {
             if (!matches(header, 0, "RIFF") || !matches(header, 8, "WAVE") || !matches(header, 36, "data")) {
                 throw new IOException("Not a canonical recorder WAV: " + file);
             }
+            // Whole frames only. A stereo file cut on a sample boundary keeps a trailing lone
+            // sample, so the data chunk would claim a size that is not a whole number of
+            // frames; the count comes from the header, so a mono WAV still salvages as before.
+            int channels = (header[CHANNELS_OFFSET] & 0xff) | ((header[CHANNELS_OFFSET + 1] & 0xff) << 8);
+            if (channels != 1 && channels != 2) {
+                throw new IOException("Unsupported WAV channel count " + channels + ": " + file);
+            }
             long dataBytes = length - HEADER_SIZE;
+            dataBytes -= dataBytes % ((long) channels * BYTES_PER_SAMPLE);
             raf.seek(4);
             writeIntLe(raf, (int) (36 + dataBytes));
             raf.seek(40);
@@ -75,7 +92,29 @@ final class WavFileWriter {
         }
     }
 
-    private static byte[] buildHeader(int dataBytes) {
+    /**
+     * Channel count from an existing recorder WAV. The encoder needs it to size frames, and
+     * reading it back (rather than assuming) is what lets a mono WAV written by an older
+     * build still salvage correctly after the recorder switched to stereo.
+     */
+    static int readChannels(File file) throws IOException {
+        try (RandomAccessFile raf = new RandomAccessFile(file, "r")) {
+            if (raf.length() < HEADER_SIZE) {
+                throw new IOException("Not a recorder WAV (shorter than header): " + file);
+            }
+            raf.seek(CHANNELS_OFFSET);
+            int lo = raf.read();
+            int hi = raf.read();
+            int channels = (hi << 8) | lo;
+            if (channels != 1 && channels != 2) {
+                throw new IOException("Unsupported WAV channel count " + channels + ": " + file);
+            }
+            return channels;
+        }
+    }
+
+    private static byte[] buildHeader(int channels, int dataBytes) {
+        int blockAlign = channels * BYTES_PER_SAMPLE;
         byte[] h = new byte[HEADER_SIZE];
         putAscii(h, 0, "RIFF");
         putIntLe(h, 4, 36 + dataBytes);
@@ -83,10 +122,10 @@ final class WavFileWriter {
         putAscii(h, 12, "fmt ");
         putIntLe(h, 16, 16); // fmt chunk size (PCM)
         putShortLe(h, 20, (short) 1); // audio format: PCM
-        putShortLe(h, 22, (short) 1); // channels: mono
+        putShortLe(h, CHANNELS_OFFSET, (short) channels);
         putIntLe(h, 24, SAMPLE_RATE);
-        putIntLe(h, 28, SAMPLE_RATE * 2); // byte rate
-        putShortLe(h, 32, (short) 2); // block align
+        putIntLe(h, 28, SAMPLE_RATE * blockAlign); // byte rate
+        putShortLe(h, 32, (short) blockAlign);
         putShortLe(h, 34, (short) 16); // bits per sample
         putAscii(h, 36, "data");
         putIntLe(h, 40, dataBytes);

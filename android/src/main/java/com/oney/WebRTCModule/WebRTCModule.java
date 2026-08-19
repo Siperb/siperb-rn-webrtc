@@ -1593,6 +1593,9 @@ public class WebRTCModule extends ReactContextBaseJavaModule {
             String wavPath = options.hasKey("wavPath") ? options.getString("wavPath") : null;
             String m4aPath = options.hasKey("m4aPath") ? options.getString("m4aPath") : null;
             boolean includeMic = options.hasKey("includeMic") && options.getBoolean("includeMic");
+            // Absent means mono: the caller owns the product decision, and an older caller
+            // that never sends the flag keeps the layout it was written against.
+            boolean stereo = options.hasKey("stereo") && options.getBoolean("stereo");
             ReadableArray remoteTrackIds = options.hasKey("remoteTrackIds") ? options.getArray("remoteTrackIds") : null;
             ReadableArray peerConnectionIds =
                     options.hasKey("peerConnectionIds") ? options.getArray("peerConnectionIds") : null;
@@ -1605,7 +1608,7 @@ public class WebRTCModule extends ReactContextBaseJavaModule {
             List<Pair<AudioTrack, Integer>> remoteAudioTracks =
                     resolveRemoteAudioTracks(remoteTrackIds, peerConnectionIds);
             mCallAudioRecordingManager.startRecording(
-                    recordingId, wavPath, m4aPath, includeMic, remoteAudioTracks, promise);
+                    recordingId, wavPath, m4aPath, includeMic, stereo, remoteAudioTracks, promise);
         });
     }
 

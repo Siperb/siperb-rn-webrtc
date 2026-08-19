@@ -13,6 +13,12 @@ export interface CallRecordingOptions {
     m4aPath: string;
     /** Mix the local microphone into the recording. */
     includeMic: boolean;
+    /**
+     * Write a channel-SPLIT stereo file — left the microphone, right every remote party
+     * summed into one side — instead of summing everything to mono. Not true stereo: a SIP
+     * call carries no stereo material. Omitted/false keeps the mono layout.
+     */
+    stereo?: boolean;
     /** Remote audio MediaStreamTrack ids to mix in. */
     remoteTrackIds: string[];
     /** Peer connection ids owning the remote tracks (parallel lookup aid). */
@@ -30,9 +36,10 @@ export type CallRecorderEvent = 'audioRecordingStarted' | 'audioRecordingStopped
 
 /**
  * Native call recorder: taps the WebRTC microphone samples and remote audio
- * track sinks inside the native layer, mixes them to mono 48 kHz PCM, streams
- * a crash-safe WAV during the recording and finalizes it to AAC .m4a on stop.
- * Audio data never crosses the JS bridge.
+ * track sinks inside the native layer, mixes them to 48 kHz PCM (mono, or
+ * channel-split stereo with `stereo: true`), streams a crash-safe WAV during
+ * the recording and finalizes it to AAC .m4a on stop. Audio data never crosses
+ * the JS bridge.
  */
 export default class CallRecorder {
     /**
@@ -59,7 +66,9 @@ export default class CallRecorder {
 
     /**
      * Finalize a WAV left behind by a crash/kill mid-recording into a playable
-     * .m4a (the WAV header sizes are recovered from file length).
+     * .m4a (the WAV header sizes are recovered from file length). The channel
+     * count comes from the WAV's own header, so orphans written by an earlier
+     * mono build still salvage correctly.
      */
     static finalizeOrphan(wavPath: string, m4aPath: string): Promise<Omit<CallRecordingResult, 'recordingId'>> {
         return WebRTCModule.finalizeOrphanRecording(wavPath, m4aPath);
