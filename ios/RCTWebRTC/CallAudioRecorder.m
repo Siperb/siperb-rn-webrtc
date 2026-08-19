@@ -9,9 +9,9 @@
 
 NSString *const kCallRecordingErrorDomain = @"CallRecording";
 
-static const double kTargetSampleRate = 48000;
+#define kTargetSampleRate SiperbAudioTargetSampleRate
 static const NSUInteger kSamplesPerTick = 480;  // 10 ms @ 48 kHz
-static const NSUInteger kRingCapacity = 24000;  // ~500 ms per source, drop-oldest on overflow
+#define kRingCapacity SiperbAudioRingCapacity
 static const uint64_t kTickIntervalNs = 10 * NSEC_PER_MSEC;
 static const NSUInteger kWarmupTicks = 20;  // 200 ms: skip all-empty ticks while sources spin up
 static const NSUInteger kMaxDrainTicks = 256;
@@ -35,114 +35,12 @@ static NSError *CallRecordingError(CallRecordingErrorCode code, NSString *messag
  * resampled to 48 kHz. Pushed from a real-time audio thread, pulled by the writer clock,
  * so all state is guarded by a small unfair lock (never held across file IO).
  */
-@interface CallRecorderAudioSource : NSObject {
-  @public
-    os_unfair_lock _lock;
-    int16_t *_ring;
-    NSUInteger _head;
-    NSUInteger _count;
-    // Linear-resampler carry state: fractional read position ahead of the previous block's
-    // last sample, so interpolation stays continuous across push boundaries.
-    double _resamplePos;
-    int16_t _lastSample;
-}
-@end
+#import "SiperbAudioSource.h"
 
-@implementation CallRecorderAudioSource
+// CallRecorderAudioSource moved to SiperbAudioSource so the conference mixer can reuse
+// the same ring and resampler rather than carrying a second copy. A pure move.
+typedef SiperbAudioSource CallRecorderAudioSource;
 
-- (instancetype)init {
-    self = [super init];
-    if (self) {
-        _lock = OS_UNFAIR_LOCK_INIT;
-        _ring = malloc(kRingCapacity * sizeof(int16_t));
-        _resamplePos = 1.0;  // start exactly on the first real input sample
-    }
-    return self;
-}
-
-- (void)dealloc {
-    free(_ring);
-}
-
-- (void)appendSamples:(const int16_t *)samples count:(NSUInteger)count {
-    if (_ring == NULL || count == 0) {
-        return;
-    }
-    if (count > kRingCapacity) {  // keep only the newest full window
-        samples += count - kRingCapacity;
-        count = kRingCapacity;
-    }
-    os_unfair_lock_lock(&_lock);
-    NSUInteger overflow = (_count + count > kRingCapacity) ? (_count + count - kRingCapacity) : 0;
-    if (overflow > 0) {  // drop-oldest
-        _head = (_head + overflow) % kRingCapacity;
-        _count -= overflow;
-    }
-    NSUInteger tail = (_head + _count) % kRingCapacity;
-    NSUInteger firstSegment = MIN(count, kRingCapacity - tail);
-    memcpy(_ring + tail, samples, firstSegment * sizeof(int16_t));
-    if (count > firstSegment) {
-        memcpy(_ring, samples + firstSegment, (count - firstSegment) * sizeof(int16_t));
-    }
-    _count += count;
-    os_unfair_lock_unlock(&_lock);
-}
-
-- (NSUInteger)pullSamples:(int16_t *)out count:(NSUInteger)want {
-    os_unfair_lock_lock(&_lock);
-    NSUInteger take = MIN(_count, want);
-    NSUInteger firstSegment = MIN(take, kRingCapacity - _head);
-    memcpy(out, _ring + _head, firstSegment * sizeof(int16_t));
-    if (take > firstSegment) {
-        memcpy(out + firstSegment, _ring, (take - firstSegment) * sizeof(int16_t));
-    }
-    _head = (_head + take) % kRingCapacity;
-    _count -= take;
-    os_unfair_lock_unlock(&_lock);
-    return take;
-}
-
-- (BOOL)hasSamples {
-    os_unfair_lock_lock(&_lock);
-    BOOL any = _count > 0;
-    os_unfair_lock_unlock(&_lock);
-    return any;
-}
-
-/** Resamples to 48 kHz (linear interpolation) and appends. Runs on the pushing audio thread. */
-- (void)pushSamples:(const int16_t *)samples count:(NSUInteger)count sampleRate:(double)sampleRate {
-    if (count == 0 || sampleRate <= 0) {
-        return;
-    }
-    if (sampleRate == kTargetSampleRate) {
-        [self appendSamples:samples count:count];
-        // Keep carry state coherent in case the rate changes on the next push.
-        _lastSample = samples[count - 1];
-        _resamplePos = 1.0;
-        return;
-    }
-    // Virtual input stream: v[0] = _lastSample, v[1..count] = samples[0..count-1].
-    // Emit output at fractional positions pos, pos+step, ... while pos < count.
-    const double step = sampleRate / kTargetSampleRate;
-    double pos = _resamplePos;
-    int16_t scratch[kResampleChunkCapacity];  // bounded stack slice; loop re-fills for long inputs
-    while (pos < (double)count) {
-        NSUInteger produced = 0;
-        while (pos < (double)count && produced < kResampleChunkCapacity) {
-            NSUInteger index = (NSUInteger)pos;
-            double frac = pos - (double)index;
-            int16_t s0 = (index == 0) ? _lastSample : samples[index - 1];
-            int16_t s1 = samples[index];
-            scratch[produced++] = (int16_t)(s0 + (double)(s1 - s0) * frac);
-            pos += step;
-        }
-        [self appendSamples:scratch count:produced];
-    }
-    _resamplePos = pos - (double)count;
-    _lastSample = samples[count - 1];
-}
-
-@end
 
 #pragma mark - WAV helpers
 
