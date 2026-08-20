@@ -74,6 +74,23 @@ public class BusTest {
         t("muting drops only US from the mix; B still reaches A (expect 3000)", out[0] == 3000);
         bus.setMicMuted(false);
 
+        // --- MUTE MUST NOT RECORD YOU AND REPLAY IT ----------------------------
+        // Regression, and it was measured rather than theorised: muting only skipped the
+        // accumulate, so nothing drained the mic's rings while pushMicrophone kept filling
+        // them. The ring saturated and HELD the last half second of audio captured while
+        // muted, which unmute then shipped to the far end -- with every later word running
+        // ~490 ms late for the rest of the call.
+        bus.clear();
+        bus.addLeg("A");
+        bus.setMicMuted(true);
+        for (int i = 0; i < 60; i++) mic(bus, 111);   // said while muted; must never be heard
+        for (int i = 0; i < 60; i++) bus.pull("A", acc, out, N, scratch);
+        bus.setMicMuted(false);
+        mic(bus, 222);                                 // said after unmute
+        leg(bus, "A", 0);
+        bus.pull("A", acc, out, N, scratch);
+        t("unmuting sends LIVE audio, not what was captured while muted (expect 222)", out[0] == 222);
+
         // --- saturating, not wrapping ------------------------------------------
         bus.clear();
         bus.addLeg("X"); bus.addLeg("Y");

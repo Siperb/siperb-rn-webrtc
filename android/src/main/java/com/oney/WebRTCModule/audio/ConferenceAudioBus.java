@@ -236,12 +236,24 @@ public final class ConferenceAudioBus {
      */
     public void clear() {
         synchronized (legLock) {
+            // PRUNE, don't just empty. clearRings() drops ring CONTENTS but leaves the mic
+            // holding a ring per leg id forever — only removeLeg prunes, and teardown does not
+            // go through it. Leg ids are per-call, so the map grew for the life of the process
+            // and fanOut writes EVERY ring on EVERY mic push: the real-time cost grew with the
+            // number of conferences the app had ever held.
+            for (String consumerId : consumers) {
+                if (!CONSUMER_RECORDING.equals(consumerId)) {
+                    mic.removeConsumer(consumerId);
+                }
+            }
             legs = Collections.emptyMap();
             consumers = Collections.singleton(CONSUMER_RECORDING);
+
+            // Inside the lock: these were outside it, so a concurrent addLeg could interleave.
+            mic.clearRings();
+            mic.ensureConsumer(CONSUMER_RECORDING);
         }
         micMuted = false;
-        mic.clearRings();
-        mic.ensureConsumer(CONSUMER_RECORDING);
     }
 
     public boolean isActive() {
@@ -285,8 +297,17 @@ public final class ConferenceAudioBus {
         Arrays.fill(accumulator, 0, frames, 0);
         boolean any = false;
 
-        if (!micMuted) {
-            any |= accumulate(mic, legId, accumulator, frames, scratch);
+        // DRAINED UNCONDITIONALLY, ADDED CONDITIONALLY. Muting only skipped the accumulate,
+        // so nothing consumed the mic's rings while pushMicrophone kept filling them — the
+        // ring saturated at its 500 ms capacity and HELD the last half second of audio
+        // captured while muted. Unmuting then shipped it to the far end, and every word after
+        // ran ~490 ms late for the rest of the call. Measured, not theorised.
+        final int micSamples = mic.drain(legId, scratch, frames);
+        if (!micMuted && micSamples > 0) {
+            for (int i = 0; i < micSamples; i++) {
+                accumulator[i] += scratch[i];
+            }
+            any = true;
         }
 
         // Read the volatile ONCE. Re-reading per leg would let the map change mid-mix, which

@@ -37,8 +37,8 @@ static const NSUInteger kMaxFrames = 4096;
 }
 
 - (void)addDelegate:(id<RTCAudioCustomProcessingDelegate>)delegate {
-    if (delegate == nil) {
-        return;
+    if (delegate == nil || delegate == self) {
+        return;  // documented idempotent: adding the fanout to itself would recurse forever
     }
     os_unfair_lock_lock(&_lock);
     if (![_delegates containsObject:delegate]) {
@@ -94,6 +94,8 @@ static const NSUInteger kMaxFrames = 4096;
     int32_t _sampleRate;
     int16_t *_mono;
     int16_t *_mix;
+    int16_t *_scratch;
+    int32_t *_accumulator;
 }
 
 - (instancetype)init {
@@ -101,6 +103,10 @@ static const NSUInteger kMaxFrames = 4096;
     if (self) {
         _mono = malloc(kMaxFrames * sizeof(int16_t));
         _mix = malloc(kMaxFrames * sizeof(int16_t));
+        // PER-INSTANCE, never shared with the bus: every leg mixes on its own capture thread
+        // and shared scratch would let one leg zero another's half-summed frame.
+        _scratch = malloc(kMaxFrames * sizeof(int16_t));
+        _accumulator = malloc(kMaxFrames * sizeof(int32_t));
     }
     return self;
 }
@@ -108,6 +114,8 @@ static const NSUInteger kMaxFrames = 4096;
 - (void)dealloc {
     free(_mono);
     free(_mix);
+    free(_scratch);
+    free(_accumulator);
 }
 
 - (void)audioProcessingInitializeWithSampleRate:(size_t)sampleRateHz channels:(size_t)channels {
@@ -134,6 +142,23 @@ static const NSUInteger kMaxFrames = 4096;
         rate = (double)frames * 100.0;  // the APM works in 10 ms chunks
     }
 
+    // THE BUS IS 48 kHz BY CONTRACT and sources resample on the way IN, but nothing
+    // resamples on the way OUT. On a Bluetooth HFP route the session drops to 16 kHz and the
+    // APM follows, so writing 48 kHz content into a 16 kHz buffer makes everyone ~3x slow AND
+    // starves the rings, because only a third of what is pushed is consumed.
+    //
+    // Refused rather than resampled for now: emitting slow audio silently is the worst of the
+    // three options, and the route is routine rather than exotic on this product.
+    if ((NSUInteger)llround(rate) != (NSUInteger)SiperbAudioTargetSampleRate) {
+        static dispatch_once_t warnOnce;
+        dispatch_once(&warnOnce, ^{
+            RCTLogWarn(@"[ConferenceMix] capture is %d Hz, bus is %.0f Hz - conference audio "
+                       @"disabled on this route until the mix is resampled out",
+                       _sampleRate, SiperbAudioTargetSampleRate);
+        });
+        return;
+    }
+
     SiperbConferenceAudioBus *bus = [SiperbConferenceAudioBus sharedBus];
 
     // FloatS16, NOT normalised: these floats are already in int16 range. Scaling by 32767 on
@@ -151,11 +176,12 @@ static const NSUInteger kMaxFrames = 4096;
         [bus pushMicrophone:_mono count:frames sampleRate:rate];
     }
 
-    if (![bus pullForLeg:legId into:_mix frames:frames]) {
-        // Nothing to send but us. On the host the buffer already holds exactly that, so
-        // leaving it untouched is both correct and cheaper; a synthesised leg has no
-        // microphone worth sending, so it is silenced instead.
-        if (!self.feedsMicrophone) {
+    if (![bus pullForLeg:legId into:_mix frames:frames accumulator:_accumulator scratch:_scratch]) {
+        // Nothing was summed. On the host the buffer already holds the microphone, so leaving
+        // it alone is right -- UNLESS WE ARE MUTED, in which case leaving it alone transmits
+        // the live mic. "Nothing summed" is exactly the state a muted host reaches once the
+        // other legs underrun or hang up, so this is a real leak and not a corner case.
+        if (!self.feedsMicrophone || bus.micMuted) {
             for (size_t c = 0; c < channels; c++) {
                 float *samples = [audioBuffer rawBufferForChannel:c];
                 if (samples) {
@@ -197,48 +223,67 @@ static const NSUInteger kMaxFrames = 4096;
 }
 
 - (void)renderPCMBuffer:(AVAudioPCMBuffer *)pcmBuffer {
-    const AVAudioFrameCount frames = pcmBuffer.frameLength;
-    if (frames == 0) {
-        return;
-    }
-    const AVAudioChannelCount channels = pcmBuffer.format.channelCount;
-    const double rate = pcmBuffer.format.sampleRate;
-    if (channels == 0 || rate <= 0) {
+    AVAudioFormat *format = pcmBuffer.format;
+    const NSUInteger frames = pcmBuffer.frameLength;
+    const NSUInteger channels = format.channelCount;
+    const double sampleRate = format.sampleRate;
+    if (frames == 0 || channels == 0 || sampleRate <= 0) {
         return;
     }
 
-    if (_capacity < frames) {
-        free(_copy);
-        _copy = malloc(frames * sizeof(int16_t));
+    if (frames > _capacity) {
+        int16_t *grown = realloc(_copy, frames * sizeof(int16_t));
+        if (grown == NULL) {
+            return;  // checked: setting _capacity regardless would NULL-write on the next line
+        }
+        _copy = grown;
         _capacity = frames;
     }
 
-    // Downmix to mono by averaging, whatever the source layout - the same rule
-    // RemoteAudioSink follows, so both taps mean the same thing.
-    if (pcmBuffer.int16ChannelData != NULL) {
-        int16_t *const *data = pcmBuffer.int16ChannelData;
-        for (AVAudioFrameCount i = 0; i < frames; i++) {
-            int32_t sum = 0;
-            for (AVAudioChannelCount c = 0; c < channels; c++) {
-                sum += data[c][i];
-            }
-            _copy[i] = (int16_t)(sum / (int32_t)channels);
-        }
-    } else if (pcmBuffer.floatChannelData != NULL) {
+    // ALL FOUR SHAPES, because webrtc-sdk delivers interleaved buffers and an interleaved
+    // AVAudioPCMBuffer exposes a ONE-ELEMENT channel pointer array -- indexing data[c] for
+    // c > 0 reads past it. Mono remotes hid this; the first stereo answer would crash the
+    // render thread. Deliberately identical to RemoteAudioSink, which already got this right.
+    if (format.commonFormat == AVAudioPCMFormatFloat32 && pcmBuffer.floatChannelData != NULL) {
         float *const *data = pcmBuffer.floatChannelData;
-        for (AVAudioFrameCount i = 0; i < frames; i++) {
-            float sum = 0.f;
-            for (AVAudioChannelCount c = 0; c < channels; c++) {
-                sum += data[c][i];
+        const float scale = 32767.0f / (float)channels;
+        if (format.isInterleaved) {
+            const float *interleaved = data[0];
+            for (NSUInteger i = 0; i < frames; i++) {
+                float acc = 0;
+                for (NSUInteger c = 0; c < channels; c++) acc += interleaved[i * channels + c];
+                float v = acc * scale;
+                _copy[i] = (int16_t)(v > 32767.0f ? 32767.0f : (v < -32768.0f ? -32768.0f : v));
             }
-            const float v = (sum / (float)channels) * 32767.f;
-            _copy[i] = (int16_t)(v > 32767.f ? 32767.f : (v < -32768.f ? -32768.f : v));
+        } else {
+            for (NSUInteger i = 0; i < frames; i++) {
+                float acc = 0;
+                for (NSUInteger c = 0; c < channels; c++) acc += data[c][i];
+                float v = acc * scale;
+                _copy[i] = (int16_t)(v > 32767.0f ? 32767.0f : (v < -32768.0f ? -32768.0f : v));
+            }
+        }
+    } else if (format.commonFormat == AVAudioPCMFormatInt16 && pcmBuffer.int16ChannelData != NULL) {
+        int16_t *const *data = pcmBuffer.int16ChannelData;
+        if (format.isInterleaved) {
+            const int16_t *interleaved = data[0];
+            for (NSUInteger i = 0; i < frames; i++) {
+                int32_t acc = 0;
+                for (NSUInteger c = 0; c < channels; c++) acc += interleaved[i * channels + c];
+                _copy[i] = (int16_t)(acc / (int32_t)channels);  // an average of int16 fits int16
+            }
+        } else {
+            for (NSUInteger i = 0; i < frames; i++) {
+                int32_t acc = 0;
+                for (NSUInteger c = 0; c < channels; c++) acc += data[c][i];
+                _copy[i] = (int16_t)(acc / (int32_t)channels);
+            }
         }
     } else {
-        return;
+        return;  // webrtc-sdk only delivers float32/int16 PCM
     }
 
-    [[SiperbConferenceAudioBus sharedBus] pushLeg:self.legId samples:_copy count:frames sampleRate:rate];
+    [[SiperbConferenceAudioBus sharedBus] pushLeg:self.legId samples:_copy count:frames sampleRate:sampleRate];
 }
 
 @end

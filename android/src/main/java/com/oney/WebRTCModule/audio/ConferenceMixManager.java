@@ -104,6 +104,8 @@ public final class ConferenceMixManager {
         private short[] io = new short[0];
         private short[] scratch = new short[0];
         private int[] accumulator = new int[0];
+        private boolean warnedRate;
+        private boolean warnedBands;
 
         @Override
         public void initialize(int sampleRateHz, int numChannels) {
@@ -120,11 +122,41 @@ public final class ConferenceMixManager {
         public void process(int numBands, int numFrames, ByteBuffer buffer) {
             final String legId = hostLegId;
             if (legId == null || sampleRate <= 0 || numFrames <= 0) return;
-            // numBands > 1 means the APM split the signal into frequency bands and only the
-            // lowest carries the audible content. Mixing across bands is not meaningful, so
-            // decline rather than produce something subtly wrong.
-            if (numBands != 1) return;
+            // numBands > 1: only the lowest band carries the audible content, so mixing
+            // across bands is not meaningful.
+            //
+            // UNVERIFIED AND LOAD-BEARING. AudioBuffer::num_bands() is a property of the
+            // buffer's SAMPLE RATE (1/2/3 at 16/32/48 kHz), not a "currently split" flag -- so
+            // if the JNI wrapper passes that straight through, this returns on every 48 kHz
+            // device and the HOST leg silently sends its bare microphone while synthetic legs
+            // work fine. It would look correct on a 16 kHz emulator. Logged once so a device
+            // run settles it.
+            if (numBands != 1) {
+                if (!warnedBands) {
+                    warnedBands = true;
+                    Log.w(TAG, "host mix DECLINED: numBands=" + numBands + " frames=" + numFrames
+                            + " channels=" + channels + " rate=" + sampleRate
+                            + " - if this fires on a real device the guard is wrong, not the audio");
+                }
+                return;
+            }
 
+            // THE BUS IS 48 kHz BY CONTRACT and sources resample on the way IN, but nothing
+            // resamples on the way OUT. WebRtcAudioManager falls back to 16000 (and returns it
+            // unconditionally on an emulator), so a leg can easily be running at 16 kHz -- and
+            // 48 kHz content clocked at 16 kHz is ~3x too fast AND starves the ring, because
+            // only a third of what is pushed is consumed.
+            //
+            // Refused rather than resampled for now: shipping wrong-speed audio silently is
+            // the worst of the three options.
+            if (sampleRate != ConferenceAudioBus.SAMPLE_RATE) {
+                if (!warnedRate) {
+                    warnedRate = true;
+                    Log.w(TAG, "capture is " + sampleRate + " Hz, bus is " + ConferenceAudioBus.SAMPLE_RATE
+                            + " Hz - conference audio disabled on this route until the mix is resampled out");
+                }
+                return;
+            }
             final int total = numFrames * channels;
             if (io.length < total) io = new short[total];
             if (scratch.length < numFrames) scratch = new short[numFrames];
@@ -136,8 +168,14 @@ public final class ConferenceMixManager {
             bus.pushMicrophone(io, total, sampleRate, channels);
 
             if (!bus.pull(legId, accumulator, scratch, numFrames, io)) {
-                // Nothing to send but us, and we are already what is in the buffer. Leaving
-                // it untouched is both correct and cheaper than writing our own samples back.
+                // Nothing was summed. The buffer already holds the microphone, so leaving it
+                // alone is right -- UNLESS WE ARE MUTED, in which case leaving it alone
+                // transmits the live mic. "Nothing summed" is exactly the state a muted host
+                // reaches once the other legs underrun or hang up, so this is a real leak.
+                if (bus.isMicMuted()) {
+                    pcm.rewind();
+                    for (int i = 0; i < total; i++) pcm.put(i, (short) 0);
+                }
                 return;
             }
 
@@ -287,8 +325,13 @@ public final class ConferenceMixManager {
             if (legTaps != null) {
                 for (RemoteTap tap : legTaps) tap.detach();
             }
-            SyntheticLeg leg = synthetic.remove(legId);
-            if (leg != null && leg.factory != null) leg.factory.dispose();
+            // NOT disposed here. nativeFreeFactory destroys the factory AND stops its
+            // signaling/worker/network threads, and any PeerConnection built on it is then
+            // holding dangling pointers -- a native crash on hangup, timing-dependent.
+            // detachLeg and pc.close() are separate JS calls with no ordering between them,
+            // so the factory is retained until teardown, which the contract places after the
+            // calls are down. A retained factory is a leak; a disposed one is a crash.
+            synthetic.remove(legId);
 
             bus.removeLeg(legId);
             if (legId.equals(hostLegId)) {
@@ -309,9 +352,10 @@ public final class ConferenceMixManager {
                 }
             }
             taps.clear();
-            for (SyntheticLeg leg : synthetic.values()) {
-                if (leg.factory != null) leg.factory.dispose();
-            }
+            // Same reasoning as detachLeg: teardown can be called while a PeerConnection is
+            // still open (the contract even advertises it as safe when none was ever up), so
+            // disposing here would be the same dangling-thread crash. Released when the
+            // process is.
             synthetic.clear();
             hostLegId = null;
             setMainInjectionEnabled(false);

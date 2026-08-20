@@ -109,8 +109,6 @@ static const NSUInteger kMaxFrames = 4096;
     NSMutableArray<NSString *> *_consumers;
     os_unfair_lock _legLock;
 
-    int32_t *_accumulator;
-    int16_t *_scratch;
 }
 
 + (NSString *)recordingConsumer {
@@ -135,16 +133,9 @@ static const NSUInteger kMaxFrames = 4096;
         _mic = [SiperbBusSource new];
         _legs = [NSMutableDictionary new];
         _consumers = [NSMutableArray arrayWithObject:[[self class] recordingConsumer]];
-        _accumulator = malloc(kMaxFrames * sizeof(int32_t));
-        _scratch = malloc(kMaxFrames * sizeof(int16_t));
         [_mic ensureConsumer:[[self class] recordingConsumer]];
     }
     return self;
-}
-
-- (void)dealloc {
-    free(_accumulator);
-    free(_scratch);
 }
 
 - (BOOL)active {
@@ -257,15 +248,20 @@ static inline int16_t ClampToInt16(int32_t v) {
     return v > INT16_MAX ? INT16_MAX : (v < INT16_MIN ? INT16_MIN : (int16_t)v);
 }
 
-- (BOOL)pullForLeg:(NSString *)legId into:(int16_t *)out frames:(NSUInteger)frames {
-    if (legId == nil || out == NULL || frames == 0 || frames > kMaxFrames) {
+- (BOOL)pullForLeg:(NSString *)legId
+              into:(int16_t *)out
+            frames:(NSUInteger)frames
+       accumulator:(int32_t *)_accumulator
+           scratch:(int16_t *)_scratch {
+    if (legId == nil || out == NULL || _accumulator == NULL || _scratch == NULL || frames == 0 ||
+        frames > kMaxFrames) {
         return NO;
     }
     memset(_accumulator, 0, frames * sizeof(int32_t));
     BOOL any = NO;
 
     if (!self.micMuted) {
-        any |= [self accumulate:_mic consumer:legId frames:frames];
+        any |= [self accumulate:_mic consumer:legId frames:frames accumulator:_accumulator scratch:_scratch];
     }
 
     os_unfair_lock_lock(&_legLock);
@@ -276,7 +272,11 @@ static inline int16_t ClampToInt16(int32_t v) {
         if ([otherId isEqualToString:legId]) {
             continue;  // never its own audio
         }
-        any |= [self accumulate:snapshot[otherId] consumer:legId frames:frames];
+        any |= [self accumulate:snapshot[otherId]
+                       consumer:legId
+                         frames:frames
+                    accumulator:_accumulator
+                        scratch:_scratch];
     }
 
     for (NSUInteger i = 0; i < frames; i++) {
@@ -285,8 +285,11 @@ static inline int16_t ClampToInt16(int32_t v) {
     return any;
 }
 
-- (BOOL)pullRemoteSumInto:(int16_t *)out frames:(NSUInteger)frames {
-    if (out == NULL || frames == 0 || frames > kMaxFrames) {
+- (BOOL)pullRemoteSumInto:(int16_t *)out
+                   frames:(NSUInteger)frames
+              accumulator:(int32_t *)_accumulator
+                  scratch:(int16_t *)_scratch {
+    if (out == NULL || _accumulator == NULL || _scratch == NULL || frames == 0 || frames > kMaxFrames) {
         return NO;
     }
     memset(_accumulator, 0, frames * sizeof(int32_t));
@@ -297,7 +300,11 @@ static inline int16_t ClampToInt16(int32_t v) {
     os_unfair_lock_unlock(&_legLock);
 
     for (SiperbBusSource *leg in snapshot) {
-        any |= [self accumulate:leg consumer:[[self class] recordingConsumer] frames:frames];
+        any |= [self accumulate:leg
+                       consumer:[[self class] recordingConsumer]
+                         frames:frames
+                    accumulator:_accumulator
+                        scratch:_scratch];
     }
 
     for (NSUInteger i = 0; i < frames; i++) {
@@ -307,7 +314,11 @@ static inline int16_t ClampToInt16(int32_t v) {
 }
 
 /** Adds one source's next frame into the accumulator, zero-padding an underrun. */
-- (BOOL)accumulate:(SiperbBusSource *)source consumer:(NSString *)consumerId frames:(NSUInteger)frames {
+- (BOOL)accumulate:(SiperbBusSource *)source
+          consumer:(NSString *)consumerId
+            frames:(NSUInteger)frames
+       accumulator:(int32_t *)_accumulator
+           scratch:(int16_t *)_scratch {
     NSUInteger n = [source drain:consumerId into:_scratch frames:frames];
     if (n == 0) {
         return NO;

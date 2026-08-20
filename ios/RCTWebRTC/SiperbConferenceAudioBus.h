@@ -62,16 +62,31 @@
 /**
  * What leg `legId` should be sent: the microphone plus every other leg.
  *
- * @param out zero-padded on underrun rather than left holding the previous frame - stale
- *            audio repeating is far more noticeable than a gap.
+ * @param out         zero-padded on underrun rather than left holding the previous frame -
+ *                    stale audio repeating is far more noticeable than a gap.
+ * @param accumulator CALLER-OWNED, at least `frames` wide.
+ * @param scratch     CALLER-OWNED, at least `frames` wide.
+ *
+ * The two buffers are parameters and NOT ivars, which is the whole reason two factories can
+ * mix at once: the host leg's capture thread and every synthesised leg's capture thread call
+ * this CONCURRENTLY. Shared scratch would let one leg's memset zero another's half-summed
+ * mix, producing cross-leg bleed that worsens with each leg and cannot be reproduced in a
+ * debugger. Android passes them for the same reason.
  * @return YES if anything was mixed in; NO means this frame is silence.
  */
-- (BOOL)pullForLeg:(NSString *)legId into:(int16_t *)out frames:(NSUInteger)frames;
+- (BOOL)pullForLeg:(NSString *)legId
+              into:(int16_t *)out
+            frames:(NSUInteger)frames
+       accumulator:(int32_t *)accumulator
+           scratch:(int16_t *)scratch;
 
 /**
  * Every remote leg summed, no exclusion and no microphone - the far side of a recording,
  * which is one mixed channel however many parties are on the call.
  */
-- (BOOL)pullRemoteSumInto:(int16_t *)out frames:(NSUInteger)frames;
+- (BOOL)pullRemoteSumInto:(int16_t *)out
+                   frames:(NSUInteger)frames
+              accumulator:(int32_t *)accumulator
+                  scratch:(int16_t *)scratch;
 
 @end

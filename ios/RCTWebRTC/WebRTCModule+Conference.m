@@ -67,16 +67,18 @@ RCT_EXPORT_METHOD(conferenceAttachLegAudio : (nonnull NSNumber *)pcId legId : (N
         return;
     }
 
-    dispatch_sync(self.workerQueue, ^{
-        RTCMediaConstraints *constraints = [[RTCMediaConstraints alloc] initWithMandatoryConstraints:nil
-                                                                                optionalConstraints:nil];
-        RTCAudioSource *source = [factory audioSourceWithConstraints:constraints];
-        RTCAudioTrack *track =
-            [factory audioTrackWithSource:source
-                                  trackId:[NSString stringWithFormat:@"conference-%@", legId]];
-        [peerConnection addTrack:track
-                       streamIds:@[ [NSString stringWithFormat:@"conference-%@", legId] ]];
-    });
+    // INLINE, NOT dispatch_sync(self.workerQueue). RCT_EXPORT_METHOD bodies already run on
+    // methodQueue, and WebRTCModule.m:131 returns _workerQueue as its methodQueue -- so
+    // dispatching synchronously onto it from here deadlocks that queue unconditionally and
+    // every later WebRTC native call hangs behind it. The dispatch_sync calls elsewhere in
+    // this module are all inside RCT_EXPORT_BLOCKING_SYNCHRONOUS_METHOD, which runs on the
+    // JS thread instead.
+    RTCMediaConstraints *constraints = [[RTCMediaConstraints alloc] initWithMandatoryConstraints:nil
+                                                                            optionalConstraints:nil];
+    RTCAudioSource *source = [factory audioSourceWithConstraints:constraints];
+    RTCAudioTrack *track =
+        [factory audioTrackWithSource:source trackId:[NSString stringWithFormat:@"conference-%@", legId]];
+    [peerConnection addTrack:track streamIds:@[ [NSString stringWithFormat:@"conference-%@", legId] ]];
     resolve(@YES);
 }
 
