@@ -9,6 +9,7 @@
 
 #import "CallAudioRecordingManager.h"
 #import "WebRTCModule+RTCPeerConnection.h"
+#import "SiperbConferenceMixManager.h"
 #import "WebRTCModule.h"
 #import "WebRTCModuleOptions.h"
 
@@ -93,6 +94,11 @@
                                                                                decoderFactory:decoderFactory
                                                                                   audioDevice:audioDevice];
         }
+
+        // Conference audio. Takes over the capture-post slot and CHAINS the recorder's mic
+        // tap, which already holds it -- iOS has one delegate slot where Android has two
+        // separate hooks. Idle until a leg is attached, so an ordinary 1:1 call is untouched.
+        [[SiperbConferenceMixManager sharedManager] installOnAudioProcessingModule:_audioProcessingModule];
 
         _peerConnections = [NSMutableDictionary new];
         _localStreams = [NSMutableDictionary new];
