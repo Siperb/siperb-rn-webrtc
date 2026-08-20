@@ -13,6 +13,7 @@ import org.webrtc.audio.JavaAudioDeviceModule;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.FloatBuffer;
 import java.nio.ShortBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -141,10 +142,27 @@ public final class ConferenceMixManager {
             if (scratch.length < numFrames) scratch = new short[numFrames];
             if (accumulator.length < numFrames) accumulator = new int[numFrames];
 
-            final ShortBuffer pcm = buffer.order(ByteOrder.nativeOrder()).asShortBuffer();
-            pcm.get(io, 0, Math.min(total, pcm.remaining()));
+            // FLOAT, NOT SHORT, and the samples are FloatS16 -- floats ALREADY in int16 range
+            // (+/-32768), not normalised to +/-1. WebRTC's APM works in float on both
+            // platforms; iOS's RTCAudioBuffer hands back `float *` for exactly this reason.
+            // Reading it as int16 reinterprets the bytes of a float as two samples, which is
+            // precisely what static sounds like. Measured on a Galaxy A52s:
+            //
+            //     APM buffer: bytes=1920 floats=480 numFrames=480 channels=1 bands=3
+            //
+            // 1920/4 == 480 == numFrames*channels, which also settles the band question: the
+            // buffer holds ONE band's worth of data, so it is full-band and overwriting it is
+            // correct. bands=3 is informational -- num_bands() of the 48 kHz rate.
+            final FloatBuffer pcm = buffer.order(ByteOrder.nativeOrder()).asFloatBuffer();
+            final int got = Math.min(total, pcm.remaining());
+            for (int i = 0; i < got; i++) {
+                final float v = pcm.get(i);
+                io[i] = (short) (v > 32767f ? 32767f : (v < -32768f ? -32768f : v));
+            }
 
-            bus.pushMicrophone(io, total, sampleRate, channels);
+            // PUSH WHAT WAS ACTUALLY READ, not what was asked for: a short buffer would
+            // otherwise push the tail of the previous frame as if it were microphone.
+            bus.pushMicrophone(io, got, sampleRate, channels);
 
             if (!bus.pull(legId, accumulator, scratch, numFrames, io)) {
                 // Nothing was summed. The buffer already holds the microphone, so leaving it
@@ -152,17 +170,15 @@ public final class ConferenceMixManager {
                 // transmits the live mic. "Nothing summed" is exactly the state a muted host
                 // reaches once the other legs underrun or hang up, so this is a real leak.
                 if (bus.isMicMuted()) {
-                    pcm.rewind();
-                    for (int i = 0; i < total; i++) pcm.put(i, (short) 0);
+                    for (int i = 0; i < got; i++) pcm.put(i, 0f);
                 }
                 return;
             }
 
-            pcm.rewind();
             for (int f = 0; f < numFrames; f++) {
-                final short s = scratch[f];
+                final float v = scratch[f];
                 for (int c = 0; c < channels; c++) {
-                    pcm.put(f * channels + c, s);
+                    pcm.put(f * channels + c, v);
                 }
             }
         }
