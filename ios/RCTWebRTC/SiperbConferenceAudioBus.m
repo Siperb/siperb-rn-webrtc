@@ -223,6 +223,13 @@ static const NSUInteger kMaxFrames = 4096;
     }
 }
 
+- (BOOL)isActive {
+    os_unfair_lock_lock(&_legLock);
+    const BOOL any = _legs.count > 0;
+    os_unfair_lock_unlock(&_legLock);
+    return any;
+}
+
 - (void)clear {
     os_unfair_lock_lock(&_legLock);
     [_legs removeAllObjects];

@@ -58,6 +58,13 @@
 /** Drops every leg, un-mutes, and DRAINS THE MICROPHONE - see the note in the implementation. */
 - (void)clear;
 
+/**
+ * Is a conference up? True exactly while at least one leg is on the bus, and legs are only ever
+ * added by BuildConferenceMix - so this is "a conference is live", not "the bus object exists".
+ * The call recorder reads it per tick to decide where its far-side channel comes from.
+ */
+- (BOOL)isActive;
+
 // -- consumers --------------------------------------------------------------
 /**
  * What leg `legId` should be sent: the microphone plus every other leg.

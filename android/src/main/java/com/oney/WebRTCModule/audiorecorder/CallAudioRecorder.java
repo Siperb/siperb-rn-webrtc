@@ -9,6 +9,7 @@ import android.util.Pair;
 import com.facebook.react.bridge.Promise;
 
 import com.oney.WebRTCModule.audio.AudioSource;
+import com.oney.WebRTCModule.audio.ConferenceAudioBus;
 
 import org.webrtc.AudioTrack;
 import org.webrtc.AudioTrackSink;
@@ -68,6 +69,15 @@ class CallAudioRecorder {
     private final int[] mixAccum = new int[SAMPLES_PER_TICK];
     private final int[] mixRight;
     private final short[] pullScratch = new short[SAMPLES_PER_TICK];
+    // The conference sum's own buffers. Separate from the mix ones because pullRemoteSum
+    // ZEROES the accumulator it is given, which would wipe the mic if it shared mixAccum.
+    private final int[] busAccum = new int[SAMPLES_PER_TICK];
+    private final short[] busOut = new short[SAMPLES_PER_TICK];
+    // Process-wide singleton, and safe to hold: it is empty except while a conference is up,
+    // which is exactly what isActive() reports.
+    private final ConferenceAudioBus conferenceBus = ConferenceAudioBus.getInstance();
+    // Last reported far-side source, so the log below fires on CHANGE only and not 100x/sec.
+    private Boolean lastFromBus = null;
     private final short[] mixOut;
 
     CallAudioRecorder(CallAudioRecordingManager manager, String recordingId, String wavPath, String m4aPath,
@@ -226,12 +236,37 @@ class CallAudioRecorder {
     /** {@code samples} is a per-source frame count; stereo writes twice that many shorts. */
     private void mixAndAppend(int samples) throws IOException {
         Arrays.fill(mixAccum, 0, samples, 0);
+        // WHERE THE FAR SIDE COMES FROM, decided per tick rather than at construction.
+        //
+        // A conference is N sessions on N peer connections, so the per-track taps this recorder
+        // was handed at start only ever cover the ONE session that was recorded. The bus holds
+        // every leg, live: someone joining mid-recording simply starts appearing in the sum and
+        // nothing has to be re-attached. That is what pullRemoteSum was written for.
+        //
+        // EITHER/OR, NEVER BOTH. The recorded session's own remote track is on the bus AND in
+        // remoteSources, so summing the two would carry that party at double amplitude.
+        // AND the pull actually produced something, which is what makes this self-healing. A
+        // leg that stayed on the bus after its conference ended -- a missed detach -- would
+        // otherwise make isActive() true forever and silence the far side of every later
+        // recording. A leg that never pushes drains nothing, so the taps are used instead.
+        final boolean busActive = conferenceBus.isActive();
+        final boolean fromBus = busActive
+                && conferenceBus.pullRemoteSum(busAccum, busOut, samples, pullScratch);
+        // ON CHANGE ONLY - this runs 100x a second. busActive and fromBus are reported
+        // separately on purpose: "active but not fromBus" means legs are on the bus and none
+        // of them delivered a frame, which is a different fault from having no legs at all.
+        if (lastFromBus == null || lastFromBus != fromBus) {
+            lastFromBus = fromBus;
+            Log.i(TAG, "recording " + recordingId + ": far side from "
+                    + (fromBus ? "CONFERENCE BUS" : "per-track taps")
+                    + " (busActive=" + busActive
+                    + " legs=" + conferenceBus.legIds()
+                    + " taps=" + remoteSources.size() + ")");
+        }
         if (stereo) {
             Arrays.fill(mixRight, 0, samples, 0);
             accumulate(micSource, samples, mixAccum);
-            for (RemoteSource source : remoteSources) {
-                accumulate(source, samples, mixRight);
-            }
+            addRemote(samples, mixRight, fromBus);
             for (int i = 0; i < samples; i++) {
                 mixOut[i * 2] = clamp(mixAccum[i]);
                 mixOut[i * 2 + 1] = clamp(mixRight[i]);
@@ -240,13 +275,33 @@ class CallAudioRecorder {
             return;
         }
         accumulate(micSource, samples, mixAccum);
-        for (RemoteSource source : remoteSources) {
-            accumulate(source, samples, mixAccum);
-        }
+        addRemote(samples, mixAccum, fromBus);
         for (int i = 0; i < samples; i++) {
             mixOut[i] = clamp(mixAccum[i]);
         }
         wav.append(mixOut, samples);
+    }
+
+    /**
+     * Adds the far side into {@code target}, from the conference bus or the per-track taps.
+     *
+     * THE TAPS ARE DRAINED EITHER WAY, and that is the whole reason this is a method rather
+     * than an if at each call site. The sinks keep filling those rings whatever this recorder
+     * reads; stop draining them and they saturate, then ship the held half-second the moment a
+     * conference ends and the taps become the source again. That exact failure has already been
+     * measured once here, on the mute path -- roughly 490 ms of audio captured while muted and
+     * replayed on unmute.
+     */
+    private void addRemote(int samples, int[] target, boolean fromBus) {
+        for (RemoteSource source : remoteSources) {
+            accumulate(source, samples, fromBus ? null : target);
+        }
+        if (!fromBus) {
+            return;
+        }
+        for (int i = 0; i < samples; i++) {
+            target[i] += busOut[i];
+        }
     }
 
     /** Saturating: overlapping loud sources clip rather than wrap. */
@@ -254,11 +309,15 @@ class CallAudioRecorder {
         return v > Short.MAX_VALUE ? Short.MAX_VALUE : (v < Short.MIN_VALUE ? Short.MIN_VALUE : (short) v);
     }
 
+    /** A null {@code target} reads and discards -- see addRemote for why that is not optional. */
     private void accumulate(AudioSource source, int samples, int[] target) {
         if (source == null) {
             return;
         }
         int n = source.ring.read(pullScratch, 0, samples);
+        if (target == null) {
+            return;
+        }
         // Samples beyond n stay zero: sources with insufficient data are zero-padded.
         for (int i = 0; i < n; i++) {
             target[i] += pullScratch[i];

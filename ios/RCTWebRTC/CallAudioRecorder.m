@@ -6,6 +6,7 @@
 #import <React/RCTLog.h>
 
 #import "CallAudioRecorder.h"
+#import "SiperbConferenceAudioBus.h"
 
 NSString *const kCallRecordingErrorDomain = @"CallRecording";
 
@@ -165,8 +166,15 @@ static BOOL PatchWavHeaderFromLength(NSString *wavPath, NSError **error) {
     int32_t *_mixBuffer;   // left in stereo, the single mix in mono
     int32_t *_mixRight;    // NULL in mono
     int16_t *_writeBuffer;
+    // The conference sum's own buffers. Separate from the mix ones because pullRemoteSum
+    // ZEROES the accumulator it is given, which would wipe the mic if it shared _mixBuffer.
+    int32_t *_busAccum;
+    int16_t *_busOut;
     NSUInteger _samplesPerWrite;  // interleaved shorts per tick
     BOOL _writeFailureLogged;
+    // Last reported far-side source, so the log fires on CHANGE only and not 100x/sec.
+    // -1 = nothing reported yet.
+    int _lastFromBus;
 }
 
 - (instancetype)initWithRecordingId:(NSString *)recordingId
@@ -197,6 +205,9 @@ static BOOL PatchWavHeaderFromLength(NSString *wavPath, NSError **error) {
         _mixBuffer = malloc(kSamplesPerTick * sizeof(int32_t));
         _mixRight = stereo ? malloc(kSamplesPerTick * sizeof(int32_t)) : NULL;
         _writeBuffer = malloc(_samplesPerWrite * sizeof(int16_t));
+        _busAccum = malloc(kSamplesPerTick * sizeof(int32_t));
+        _busOut = malloc(kSamplesPerTick * sizeof(int16_t));
+        _lastFromBus = -1;
     }
     return self;
 }
@@ -212,6 +223,8 @@ static BOOL PatchWavHeaderFromLength(NSString *wavPath, NSError **error) {
     free(_mixBuffer);
     free(_mixRight);
     free(_writeBuffer);
+    free(_busAccum);
+    free(_busOut);
 }
 
 - (BOOL)start:(NSError **)error {
@@ -275,16 +288,58 @@ static BOOL PatchWavHeaderFromLength(NSString *wavPath, NSError **error) {
     if (_mixRight != NULL) {
         memset(_mixRight, 0, kSamplesPerTick * sizeof(int32_t));
     }
+    // WHERE THE FAR SIDE COMES FROM, decided per tick rather than at construction.
+    //
+    // A conference is N sessions on N peer connections, so the per-track taps this recorder was
+    // handed at start only ever cover the ONE session that was recorded. The bus holds every
+    // leg, live: someone joining mid-recording simply starts appearing in the sum and nothing
+    // has to be re-attached. That is what pullRemoteSum was written for.
+    //
+    // EITHER/OR, NEVER BOTH. The recorded session's own remote track is on the bus AND in
+    // _sources, so summing the two would carry that party at double amplitude.
+    SiperbConferenceAudioBus *bus = [SiperbConferenceAudioBus sharedBus];
+    // AND the pull actually produced something, which is what makes this self-healing. A leg
+    // that stayed on the bus after its conference ended -- a missed detach -- would otherwise
+    // make isActive true forever and silence the far side of every later recording. A leg that
+    // never pushes drains nothing, so the taps are used instead.
+    const BOOL busActive = [bus isActive];
+    const BOOL fromBus = busActive && [bus pullRemoteSumInto:_busOut
+                                                      frames:kSamplesPerTick
+                                                 accumulator:_busAccum
+                                                     scratch:_pullBuffer];
+    // ON CHANGE ONLY - this runs 100x a second. busActive and fromBus are reported separately
+    // on purpose: "active but not fromBus" means legs are on the bus and none of them
+    // delivered a frame, which is a different fault from having no legs at all.
+    if (_lastFromBus != (int)fromBus) {
+        _lastFromBus = (int)fromBus;
+        RCTLogInfo(@"[CallAudioRecorder] recording %@: far side from %@ (busActive=%d taps=%lu)",
+                   _recordingId, fromBus ? @"CONFERENCE BUS" : @"per-track taps", (int)busActive,
+                   (unsigned long)(_sources.count - (_micSourceIndex == NSNotFound ? 0 : 1)));
+    }
     NSUInteger sourceIndex = 0;
     for (CallRecorderAudioSource *source in _sources) {
+        // PULLED EITHER WAY. The taps keep filling whatever this recorder reads; stop draining
+        // them and they saturate, then ship the held half-second the moment the conference ends
+        // and they become the source again. That failure has already been measured once here,
+        // on the mute path -- roughly 490 ms replayed on unmute.
         NSUInteger pulled = [source pullSamples:_pullBuffer count:kSamplesPerTick];
+        const BOOL isMic = (sourceIndex == _micSourceIndex);
+        sourceIndex++;
+        if (fromBus && !isMic) {
+            continue;  // drained above, and the bus is carrying the far side this tick
+        }
         // Mono sums every source into one channel; stereo puts the mic left and sums every
         // remote party onto the right, so the far side is one mixed channel on a conference.
-        int32_t *target = (_mixRight != NULL && sourceIndex != _micSourceIndex) ? _mixRight : _mixBuffer;
+        int32_t *target = (_mixRight != NULL && !isMic) ? _mixRight : _mixBuffer;
         for (NSUInteger i = 0; i < pulled; i++) {
             target[i] += _pullBuffer[i];
         }
-        sourceIndex++;
+    }
+    if (fromBus) {
+        int32_t *target = (_mixRight != NULL) ? _mixRight : _mixBuffer;
+        for (NSUInteger i = 0; i < kSamplesPerTick; i++) {
+            target[i] += _busOut[i];
+        }
     }
     if (_mixRight != NULL) {
         for (NSUInteger i = 0; i < kSamplesPerTick; i++) {
