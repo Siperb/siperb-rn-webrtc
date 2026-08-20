@@ -105,7 +105,6 @@ public final class ConferenceMixManager {
         private short[] scratch = new short[0];
         private int[] accumulator = new int[0];
         private boolean warnedRate;
-        private boolean warnedBands;
 
         @Override
         public void initialize(int sampleRateHz, int numChannels) {
@@ -122,41 +121,21 @@ public final class ConferenceMixManager {
         public void process(int numBands, int numFrames, ByteBuffer buffer) {
             final String legId = hostLegId;
             if (legId == null || sampleRate <= 0 || numFrames <= 0) return;
-            // numBands > 1: only the lowest band carries the audible content, so mixing
-            // across bands is not meaningful.
+            // numBands IS A PROPERTY OF THE SAMPLE RATE, not a "currently split" flag:
+            // AudioBuffer::num_bands() is 1/2/3 at 16/32/48 kHz. Measured on a Galaxy A52s:
             //
-            // UNVERIFIED AND LOAD-BEARING. AudioBuffer::num_bands() is a property of the
-            // buffer's SAMPLE RATE (1/2/3 at 16/32/48 kHz), not a "currently split" flag -- so
-            // if the JNI wrapper passes that straight through, this returns on every 48 kHz
-            // device and the HOST leg silently sends its bare microphone while synthetic legs
-            // work fine. It would look correct on a 16 kHz emulator. Logged once so a device
-            // run settles it.
-            if (numBands != 1) {
-                if (!warnedBands) {
-                    warnedBands = true;
-                    Log.w(TAG, "host mix DECLINED: numBands=" + numBands + " frames=" + numFrames
-                            + " channels=" + channels + " rate=" + sampleRate
-                            + " - if this fires on a real device the guard is wrong, not the audio");
-                }
-                return;
-            }
+            //     APM SHAPE numBands=3 numFrames=480 channels=1 sampleRate=48000
+            //
+            // The previous guard was `if (numBands != 1) return;`, so on every 48 kHz device
+            // the HOST leg returned before it ever mixed -- it sent the bare microphone and
+            // its far end never heard the third party, while synthetic legs worked fine. It
+            // would have looked correct on a 16 kHz emulator.
+            //
+            // BAND 0 ONLY is the right answer, not "all bands": in a split-band buffer the
+            // lowest band carries the audible content and the upper bands are the high-
+            // frequency remainder. `buffer` is the band-0 plane, `numFrames` its length, so
+            // reading it directly is both correct and what the single-band case already did.
 
-            // THE BUS IS 48 kHz BY CONTRACT and sources resample on the way IN, but nothing
-            // resamples on the way OUT. WebRtcAudioManager falls back to 16000 (and returns it
-            // unconditionally on an emulator), so a leg can easily be running at 16 kHz -- and
-            // 48 kHz content clocked at 16 kHz is ~3x too fast AND starves the ring, because
-            // only a third of what is pushed is consumed.
-            //
-            // Refused rather than resampled for now: shipping wrong-speed audio silently is
-            // the worst of the three options.
-            if (sampleRate != ConferenceAudioBus.SAMPLE_RATE) {
-                if (!warnedRate) {
-                    warnedRate = true;
-                    Log.w(TAG, "capture is " + sampleRate + " Hz, bus is " + ConferenceAudioBus.SAMPLE_RATE
-                            + " Hz - conference audio disabled on this route until the mix is resampled out");
-                }
-                return;
-            }
             final int total = numFrames * channels;
             if (io.length < total) io = new short[total];
             if (scratch.length < numFrames) scratch = new short[numFrames];
