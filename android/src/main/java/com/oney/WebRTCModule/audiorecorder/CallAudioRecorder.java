@@ -80,6 +80,28 @@ class CallAudioRecorder {
     private Boolean lastFromBus = null;
     private final short[] mixOut;
 
+    /**
+     * Fan-out of the mixed tick, for a consumer that needs the SAME audio rather than its own.
+     *
+     * The one implementer is CallVideoRecorder, which muxes this into its mp4. It exists so
+     * there is ONE mixer with two consumers: a second tap on the same tracks would be a second
+     * mix, and two mixes of one call drift — the mp4's audio and the WAV's would stop being the
+     * same recording.
+     *
+     * Called on the writer thread every 10 ms with the interleaved int16 mix. The array is
+     * per-tick scratch and is overwritten immediately: COPY IT, never keep the reference.
+     */
+    interface PcmTap {
+        void onMixedTick(short[] interleaved, int totalSamples);
+    }
+
+    /** Set before start(); read on the writer thread. */
+    private volatile PcmTap pcmTap;
+
+    void setPcmTap(PcmTap tap) {
+        this.pcmTap = tap;
+    }
+
     CallAudioRecorder(CallAudioRecordingManager manager, String recordingId, String wavPath, String m4aPath,
             boolean includeMic, boolean stereo, List<Pair<AudioTrack, Integer>> remoteTracks) throws IOException {
         this.manager = manager;
@@ -271,6 +293,7 @@ class CallAudioRecorder {
                 mixOut[i * 2] = clamp(mixAccum[i]);
                 mixOut[i * 2 + 1] = clamp(mixRight[i]);
             }
+            publishTick(samples * 2);
             wav.append(mixOut, samples * 2);
             return;
         }
@@ -279,7 +302,20 @@ class CallAudioRecorder {
         for (int i = 0; i < samples; i++) {
             mixOut[i] = clamp(mixAccum[i]);
         }
+        publishTick(samples);
         wav.append(mixOut, samples);
+    }
+
+    /**
+     * BEFORE the WAV append at both call sites, so a full disk stops the WAV without also
+     * silencing the mp4 — the two consumers of this mix fail independently, which is the point
+     * of there being one mix.
+     */
+    private void publishTick(int totalSamples) {
+        PcmTap tap = pcmTap;
+        if (tap != null) {
+            tap.onMixedTick(mixOut, totalSamples);
+        }
     }
 
     /**

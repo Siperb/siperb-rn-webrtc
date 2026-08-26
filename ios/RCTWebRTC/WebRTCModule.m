@@ -22,6 +22,21 @@
     return NO;
 }
 
+/**
+ * Synchronous capability facts JS can read without a round trip.
+ *
+ * `callRecordingSupportsVideo` is what CallRecorder.supportsVideo answers from. A CONSTANT
+ * rather than a probe on some proxy method, because it states the fact directly: an OTA JS
+ * bundle can reach an app binary older than this file, where the key is simply absent and
+ * reads as false. Version skew is then handled by construction rather than by a check someone
+ * has to remember to write.
+ *
+ * Nothing here may touch UIKit — requiresMainQueueSetup is NO above.
+ */
+- (NSDictionary *)constantsToExport {
+    return @{@"callRecordingSupportsVideo" : @YES};
+}
+
 - (void)dealloc {
     [_localTracks removeAllObjects];
     _localTracks = nil;

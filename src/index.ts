@@ -8,7 +8,13 @@ if (WebRTCModule === null) {
     }`);
 }
 
-import CallRecorder, { type CallRecordingOptions, type CallRecordingResult } from './CallRecorder';
+import CallRecorder, {
+    type CallRecordingLayout,
+    type CallRecordingOptions,
+    type CallRecordingResult,
+    type CallVideoRecordingOptions,
+    type CallVideoSources,
+} from './CallRecorder';
 import ConferenceMixer from './ConferenceMixer';
 import { setupNativeEvents } from './EventEmitter';
 import Logger from './Logger';
@@ -56,8 +62,11 @@ export {
     RTCAudioSession,
     CallRecorder,
     ConferenceMixer,
+    type CallRecordingLayout,
     type CallRecordingOptions,
     type CallRecordingResult,
+    type CallVideoRecordingOptions,
+    type CallVideoSources,
     MediaStream,
     MediaStreamTrack,
     type MediaTrackSettings,

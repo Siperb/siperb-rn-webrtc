@@ -351,6 +351,12 @@ static BOOL PatchWavHeaderFromLength(NSString *wavPath, NSError **error) {
             _writeBuffer[i] = ClampToInt16(_mixBuffer[i]);
         }
     }
+    // BEFORE the fwrite, so a full disk stops the WAV without also silencing the mp4 — the two
+    // consumers of this mix fail independently, which is the point of there being one mix.
+    if (_pcmTap) {
+        _pcmTap(_writeBuffer, _samplesPerWrite);
+    }
+
     if (fwrite(_writeBuffer, sizeof(int16_t), _samplesPerWrite, _file) != _samplesPerWrite) {
         if (!_writeFailureLogged) {
             _writeFailureLogged = YES;  // log once; a full disk would otherwise spam every 10 ms

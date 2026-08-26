@@ -10,6 +10,7 @@ import com.facebook.react.bridge.WritableMap;
 import com.oney.WebRTCModule.WebRTCModule;
 
 import org.webrtc.AudioTrack;
+import org.webrtc.VideoTrack;
 import org.webrtc.audio.JavaAudioDeviceModule;
 
 import java.io.File;
@@ -32,9 +33,57 @@ import java.util.concurrent.Executors;
 public class CallAudioRecordingManager {
     static final String TAG = "CallAudioRecording";
 
+    /**
+     * The `video` block from JS, with its track ids already resolved to tracks.
+     *
+     * Built by WebRTCModule (which owns the peer connections) and read by this class, so it
+     * lives here rather than in the module: the manager is what has to be told, and a parsed
+     * request is a smaller thing to be told than seven more parameters.
+     *
+     * `width` is the FINAL frame width, already doubled by the caller for side-by-side. The
+     * SD/HD/FHD table lives in JS next to the settings it reads; nothing here re-derives it.
+     */
+    public static final class VideoRecordingRequest {
+        public int width;
+        public int height;
+        public int fps;
+        public int pnpSize;
+        public String layout;
+        /** null is a legitimate remote-only composite — the camera may simply be off. */
+        public VideoTrack localTrack;
+        public List<VideoTrack> remoteTracks = new ArrayList<>();
+    }
+
+    /**
+     * What a finished video leg produced, parked between stopping the mp4 and finishing the
+     * audio leg that resolves the promise.
+     *
+     * It exists because the two legs finalize in sequence but only ONE result goes back, and
+     * the video's is the one that wins when there is one. Keyed by recordingId in a map rather
+     * than threaded through stopAndFinalize's signature, which is on the audio path and has no
+     * business knowing what an mp4 is.
+     */
+    private static final class VideoOutcome {
+        final String filePath;
+        final long durationMs;
+        final long sizeBytes;
+
+        VideoOutcome(String filePath, long durationMs, long sizeBytes) {
+            this.filePath = filePath;
+            this.durationMs = durationMs;
+            this.sizeBytes = sizeBytes;
+        }
+    }
+
     private final WebRTCModule module;
     private final Object lock = new Object();
     private final Map<String, CallAudioRecorder> recorders = new HashMap<>();
+    // Video is a PARALLEL registry keyed by the same id rather than fields on the audio
+    // recorder: most segments have no video, and an audio recorder that knew what an mp4 was
+    // would carry the concept into every audio-only call for nothing.
+    private final Map<String, CallVideoRecorder> videoRecorders = new HashMap<>();
+    private final Map<String, List<CallVideoSink>> videoSinks = new HashMap<>();
+    private final Map<String, VideoOutcome> pendingVideoResults = new HashMap<>();
     // Snapshot for the mic fast path: with no active recorders the audio thread must
     // return immediately, without locking or allocating.
     private volatile CallAudioRecorder[] micRecorders = new CallAudioRecorder[0];
@@ -86,8 +135,9 @@ public class CallAudioRecordingManager {
         micCaptureAvailable = available;
     }
 
-    public void startRecording(String recordingId, String wavPath, String m4aPath, boolean includeMic,
-            boolean stereo, List<Pair<AudioTrack, Integer>> remoteTracks, Promise promise) {
+    public void startRecording(String recordingId, String wavPath, String outputPath, boolean includeMic,
+            boolean stereo, List<Pair<AudioTrack, Integer>> remoteTracks, VideoRecordingRequest video,
+            Promise promise) {
         synchronized (lock) {
             if (recorders.containsKey(recordingId)) {
                 promise.reject("duplicate_id", "Recording already active: " + recordingId);
@@ -103,30 +153,126 @@ public class CallAudioRecordingManager {
             promise.reject("no_sources", "No mic capture and no resolvable remote audio tracks");
             return;
         }
+
+        // The WAV is written for every segment, video or not — it is the only crash-recoverable
+        // copy, because an mp4's index is not written until stop. On a video segment the audio
+        // is therefore written twice, deliberately.
+        //
+        // audioPath is the AUDIO output. On a video segment the mp4 is the artifact and this
+        // .m4a is deleted at stop — but it is exactly what the fallback needs when the video
+        // leg dies mid-call, so it is derived here rather than left null.
+        String audioPath = video != null ? outputPath.replaceAll("\\.[^.]+$", "") + ".m4a" : outputPath;
+
         CallAudioRecorder recorder;
         try {
-            recorder = new CallAudioRecorder(this, recordingId, wavPath, m4aPath, micWanted, stereo, remoteTracks);
+            recorder = new CallAudioRecorder(this, recordingId, wavPath, audioPath, micWanted, stereo, remoteTracks);
         } catch (IOException e) {
             Log.e(TAG, "Failed to open WAV for " + recordingId, e);
             promise.reject("io_error", "Cannot open recording file: " + e.getMessage());
             return;
         }
+
+        // Started BEFORE the audio recorder, so the PcmTap is in place before the first 10 ms
+        // tick fires and the mp4 does not open with a hole where its first audio should be.
+        CallVideoRecorder videoRecorder = null;
+        List<CallVideoSink> sinks = new ArrayList<>();
+        if (video != null) {
+            CallVideoRecorder candidate = new CallVideoRecorder(outputPath, video.width, video.height, video.fps,
+                    video.layout, video.pnpSize, stereo);
+            try {
+                candidate.start();
+                videoRecorder = candidate;
+                recorder.setPcmTap(candidate);
+                if (video.localTrack != null) {
+                    sinks.add(new CallVideoSink(video.localTrack, candidate, CallVideoRecorder.LOCAL_SLOT));
+                }
+                for (int i = 0; i < video.remoteTracks.size(); i++) {
+                    sinks.add(new CallVideoSink(video.remoteTracks.get(i), candidate, i));
+                }
+            } catch (IOException | RuntimeException e) {
+                // DEGRADE, DO NOT FAIL. The caller asked for video and is getting audio; stop
+                // reports withVideo false and hands back the .m4a. Failing here would throw
+                // away a perfectly recordable call because its picture could not be encoded.
+                Log.w(TAG, "video leg failed to start for " + recordingId + " — recording audio only", e);
+                sinks.clear();
+            }
+        }
+
         recorder.attachSinks();
         recorder.start();
         synchronized (lock) {
             recorders.put(recordingId, recorder);
+            if (videoRecorder != null) {
+                videoRecorders.put(recordingId, videoRecorder);
+                videoSinks.put(recordingId, sinks);
+            }
             if (recorder.wantsMic()) {
                 rebuildMicRecorders();
             }
         }
-        emitStarted(recordingId);
+        for (CallVideoSink sink : sinks) {
+            sink.track.addSink(sink);
+        }
+        emitStarted(recordingId, videoRecorder != null);
         promise.resolve(null);
+    }
+
+    /**
+     * Swap the composited video sources mid-segment — the presentation case, where the local
+     * slot must follow a screen-share track rather than the camera.
+     *
+     * A NO-OP on an unknown id or an audio-only segment: the caller is reporting a source
+     * change, not asserting that a compositor exists to hear it.
+     */
+    public void updateVideoSources(String recordingId, VideoTrack localTrack, List<VideoTrack> remoteTracks) {
+        CallVideoRecorder videoRecorder;
+        List<CallVideoSink> previous;
+        synchronized (lock) {
+            videoRecorder = videoRecorders.get(recordingId);
+            previous = videoSinks.get(recordingId);
+        }
+        if (videoRecorder == null) {
+            return;
+        }
+
+        List<CallVideoSink> replacements = new ArrayList<>();
+        if (localTrack != null) {
+            replacements.add(new CallVideoSink(localTrack, videoRecorder, CallVideoRecorder.LOCAL_SLOT));
+        }
+        for (int i = 0; i < remoteTracks.size(); i++) {
+            replacements.add(new CallVideoSink(remoteTracks.get(i), videoRecorder, i));
+        }
+        synchronized (lock) {
+            videoSinks.put(recordingId, replacements);
+        }
+
+        int previousCount = previous == null ? 0 : previous.size();
+        if (previous != null) {
+            for (CallVideoSink sink : previous) {
+                sink.track.removeSink(sink);
+            }
+        }
+        // CLEARING MATTERS: a slot keeps its last frame forever otherwise, so dropping the
+        // camera would freeze its final picture into the recording rather than going black.
+        if (localTrack == null) {
+            videoRecorder.clearSlot(CallVideoRecorder.LOCAL_SLOT);
+        }
+        for (int slot = remoteTracks.size(); slot < previousCount; slot++) {
+            videoRecorder.clearSlot(slot);
+        }
+        for (CallVideoSink sink : replacements) {
+            sink.track.addSink(sink);
+        }
     }
 
     public void stopRecording(String recordingId, Promise promise) {
         CallAudioRecorder recorder;
+        CallVideoRecorder videoRecorder;
+        List<CallVideoSink> sinks;
         synchronized (lock) {
             recorder = recorders.remove(recordingId);
+            videoRecorder = videoRecorders.remove(recordingId);
+            sinks = videoSinks.remove(recordingId);
             if (recorder != null && recorder.wantsMic()) {
                 rebuildMicRecorders();
             }
@@ -136,7 +282,38 @@ public class CallAudioRecordingManager {
             return;
         }
         recorder.detachSinks();
-        recorder.stopAndFinalize("user", promise);
+        if (sinks != null) {
+            for (CallVideoSink sink : sinks) {
+                sink.track.removeSink(sink);
+            }
+        }
+        if (videoRecorder == null) {
+            recorder.stopAndFinalize("user", promise);
+            return;
+        }
+
+        // VIDEO: finish the mp4 FIRST, because whether it produced anything decides which file
+        // this segment is. stopAndFinalize blocks on draining the codecs, so it has to be off
+        // the module executor; the audio leg is then finalized from the same worker and is what
+        // resolves the promise, through finishStop below.
+        final CallVideoRecorder video = videoRecorder;
+        encodeExecutor.execute(() -> {
+            AacEncoder.Result videoResult = null;
+            try {
+                videoResult = video.stopAndFinalize();
+            } catch (RuntimeException e) {
+                Log.w(TAG, "video: finalize failed for " + recordingId + " — falling back to audio", e);
+            }
+            if (videoResult != null) {
+                synchronized (lock) {
+                    pendingVideoResults.put(recordingId,
+                            new VideoOutcome(video.getOutputPath(), videoResult.durationMs, videoResult.sizeBytes));
+                }
+            } else {
+                Log.w(TAG, "video: " + recordingId + " requested video and produced none — reporting the audio file");
+            }
+            recorder.stopAndFinalize("user", promise);
+        });
     }
 
     public List<String> getActiveRecordingIds() {
@@ -166,6 +343,11 @@ public class CallAudioRecordingManager {
                 map.putString("filePath", m4aPath);
                 map.putDouble("durationMs", result.durationMs);
                 map.putDouble("size", result.sizeBytes);
+                // ALWAYS audio, by construction: the WAV is the only thing a crash leaves
+                // recoverable, so a salvaged video segment comes back as its sound. Stamped
+                // rather than left off so the result reads like every other one on this surface.
+                map.putBoolean("withVideo", false);
+                map.putString("mimeType", "audio/mp4");
                 promise.resolve(map);
             } catch (IOException e) {
                 Log.e(TAG, "Orphan salvage failed for " + wavPath, e);
@@ -189,17 +371,79 @@ public class CallAudioRecordingManager {
         }
     }
 
+    /**
+     * The video half of the same safety hook, called before a remote VIDEO track is disposed.
+     *
+     * Separate from detachSinksForPeerConnection above because video sinks are held here, on
+     * the manager, not on the audio recorder — so there is no per-recorder call to delegate to.
+     * The slot is cleared as well as detached: left alone it would hold that track's last frame
+     * for the rest of the recording, freezing a departed party's final picture into the file
+     * instead of going black.
+     */
+    public void detachVideoSinksForTrack(VideoTrack track) {
+        List<CallVideoSink> matches = new ArrayList<>();
+        List<CallVideoRecorder> owners = new ArrayList<>();
+        synchronized (lock) {
+            for (Map.Entry<String, List<CallVideoSink>> entry : videoSinks.entrySet()) {
+                for (CallVideoSink sink : entry.getValue()) {
+                    if (sink.track == track) {
+                        matches.add(sink);
+                        owners.add(videoRecorders.get(entry.getKey()));
+                    }
+                }
+            }
+        }
+        for (int i = 0; i < matches.size(); i++) {
+            CallVideoSink sink = matches.get(i);
+            sink.track.removeSink(sink);
+            CallVideoRecorder owner = owners.get(i);
+            if (owner != null) {
+                owner.clearSlot(sink.slot);
+            }
+        }
+    }
+
     ExecutorService getEncodeExecutor() {
         return encodeExecutor;
     }
 
+    /**
+     * WHERE THE TWO LEGS BECOME ONE RESULT, and where `withVideo` gets its value.
+     *
+     * The video leg finished first and left its outcome in pendingVideoResults if it produced
+     * anything. When it did, the mp4 IS the recording and the .m4a beside it is redundant — a
+     * second copy of every video call on the disk — so it is deleted here.
+     *
+     * withVideo and mimeType describe THE FILE, never the request. A segment that asked for
+     * video and lost it comes through this same path with no pending outcome and reports the
+     * audio file it actually produced, which is what stops a caller inferring the contents from
+     * what it asked for.
+     */
     void finishStop(Promise promise, String recordingId, String filePath, long durationMs, long sizeBytes,
             String reason) {
+        VideoOutcome video;
+        synchronized (lock) {
+            video = pendingVideoResults.remove(recordingId);
+        }
+        boolean withVideo = video != null;
+        if (withVideo) {
+            File redundantAudio = new File(filePath);
+            if (redundantAudio.isFile() && !redundantAudio.delete()) {
+                Log.w(TAG, "Could not delete redundant audio file " + filePath);
+            }
+            filePath = video.filePath;
+            durationMs = video.durationMs;
+            sizeBytes = video.sizeBytes;
+        }
+        String mimeType = withVideo ? "video/mp4" : "audio/mp4";
+
         WritableMap result = Arguments.createMap();
         result.putString("recordingId", recordingId);
         result.putString("filePath", filePath);
         result.putDouble("durationMs", durationMs);
         result.putDouble("size", sizeBytes);
+        result.putBoolean("withVideo", withVideo);
+        result.putString("mimeType", mimeType);
         promise.resolve(result);
 
         WritableMap event = Arguments.createMap();
@@ -207,6 +451,8 @@ public class CallAudioRecordingManager {
         event.putString("filePath", filePath);
         event.putDouble("durationMs", durationMs);
         event.putDouble("size", sizeBytes);
+        event.putBoolean("withVideo", withVideo);
+        event.putString("mimeType", mimeType);
         event.putString("reason", reason);
         module.sendEvent("audioRecordingStopped", event);
     }
@@ -223,9 +469,10 @@ public class CallAudioRecordingManager {
         module.sendEvent("audioRecordingError", event);
     }
 
-    private void emitStarted(String recordingId) {
+    private void emitStarted(String recordingId, boolean withVideo) {
         WritableMap event = Arguments.createMap();
         event.putString("recordingId", recordingId);
+        event.putBoolean("withVideo", withVideo);
         module.sendEvent("audioRecordingStarted", event);
     }
 

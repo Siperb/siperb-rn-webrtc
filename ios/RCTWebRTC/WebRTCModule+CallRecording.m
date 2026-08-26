@@ -23,11 +23,12 @@ static NSString *RejectionCodeForError(NSError *error) {
 @implementation WebRTCModule (CallRecording)
 
 /**
- * Resolves a remote track id to its RTCAudioTrack, trying the hinted peer connections first
- * and then all of them (same lookup as trackForId:pcId:, remote side only). Runs on the
- * module's workerQueue like every other method touching self.peerConnections.
+ * Resolves a remote track id, trying the hinted peer connections first and then all of them
+ * (same lookup as trackForId:pcId:, remote side only). Runs on the module's workerQueue like
+ * every other method touching self.peerConnections.
  */
-- (RTCAudioTrack *)audioTrackForRecording:(NSString *)trackId hints:(NSArray<NSNumber *> *)peerConnectionIds {
+- (RTCMediaStreamTrack *)remoteTrackForRecording:(NSString *)trackId
+                                           hints:(NSArray<NSNumber *> *)peerConnectionIds {
     RTCMediaStreamTrack *track = nil;
     for (NSNumber *peerConnectionId in peerConnectionIds) {
         track = self.peerConnections[peerConnectionId].remoteTracks[trackId];
@@ -43,10 +44,73 @@ static NSString *RejectionCodeForError(NSError *error) {
             }
         }
     }
-    if (track == nil || ![track isKindOfClass:[RTCAudioTrack class]]) {
+    return track;
+}
+
+- (RTCAudioTrack *)audioTrackForRecording:(NSString *)trackId hints:(NSArray<NSNumber *> *)peerConnectionIds {
+    RTCMediaStreamTrack *track = [self remoteTrackForRecording:trackId hints:peerConnectionIds];
+    return [track isKindOfClass:[RTCAudioTrack class]] ? (RTCAudioTrack *)track : nil;
+}
+
+- (RTCVideoTrack *)videoTrackForRecording:(NSString *)trackId hints:(NSArray<NSNumber *> *)peerConnectionIds {
+    RTCMediaStreamTrack *track = [self remoteTrackForRecording:trackId hints:peerConnectionIds];
+    return [track isKindOfClass:[RTCVideoTrack class]] ? (RTCVideoTrack *)track : nil;
+}
+
+/**
+ * Builds the video config from the JS `video` block, or nil for an audio-only segment.
+ *
+ * RESOLVES NOTHING IS NOT AN ERROR. A camera that is off and a remote that has not started
+ * sending both land here with no tracks, and the honest outcome is an audio recording that
+ * SAYS it has no video — not a refused segment. Only a `video` block on a build that cannot
+ * encode is a failure, and JS has `supportsVideo` to avoid asking.
+ */
+- (CallVideoRecordingConfig *)videoConfigFromOptions:(NSDictionary *)video {
+    if (![video isKindOfClass:[NSDictionary class]]) {
         return nil;
     }
-    return (RTCAudioTrack *)track;
+    NSArray<NSNumber *> *pcHints = [RCTConvert NSNumberArray:video[@"peerConnectionIds"]];
+
+    CallVideoRecordingConfig *config = [CallVideoRecordingConfig new];
+    config.width = [RCTConvert NSInteger:video[@"width"]];
+    config.height = [RCTConvert NSInteger:video[@"height"]];
+    config.fps = [RCTConvert NSInteger:video[@"fps"]];
+    config.pnpSize = [RCTConvert NSInteger:video[@"pnpSize"]];
+    config.layout = CallVideoLayoutFromString([RCTConvert NSString:video[@"layout"]]);
+
+    // The local camera / presentation track is a LOCAL track, so it is not in any peer
+    // connection's remoteTracks — self.localTracks is the only place it lives.
+    NSString *localId = [RCTConvert NSString:video[@"localTrackId"]];
+    if (localId.length > 0) {
+        RTCMediaStreamTrack *local = self.localTracks[localId];
+        if ([local isKindOfClass:[RTCVideoTrack class]]) {
+            config.localTrack = (RTCVideoTrack *)local;
+        } else {
+            RCTLogWarn(@"[CallRecording] Local video track %@ not found, compositing remote only", localId);
+        }
+    }
+
+    NSMutableArray<RTCVideoTrack *> *remotes = [NSMutableArray new];
+    for (NSString *trackId in [RCTConvert NSStringArray:video[@"remoteTrackIds"]]) {
+        RTCVideoTrack *track = [self videoTrackForRecording:trackId hints:pcHints];
+        if (track == nil) {
+            RCTLogWarn(@"[CallRecording] Remote video track %@ not found, skipping", trackId);
+        } else if (![remotes containsObject:track]) {
+            [remotes addObject:track];
+        }
+    }
+    config.remoteTracks = remotes;
+
+    if (config.localTrack == nil && remotes.count == 0) {
+        RCTLogWarn(@"[CallRecording] video requested but no video track resolved — recording audio only");
+        return nil;
+    }
+    if (config.width <= 0 || config.height <= 0 || config.fps <= 0) {
+        RCTLogWarn(@"[CallRecording] video block has no usable geometry (%ldx%ld @%ld) — recording audio only",
+                   (long)config.width, (long)config.height, (long)config.fps);
+        return nil;
+    }
+    return config;
 }
 
 RCT_EXPORT_METHOD(startCallRecording : (NSDictionary *)options
@@ -54,15 +118,24 @@ RCT_EXPORT_METHOD(startCallRecording : (NSDictionary *)options
                   rejecter : (RCTPromiseRejectBlock)reject) {
     NSString *recordingId = [RCTConvert NSString:options[@"recordingId"]];
     NSString *wavPath = [RCTConvert NSString:options[@"wavPath"]];
-    NSString *m4aPath = [RCTConvert NSString:options[@"m4aPath"]];
+    NSString *outputPath = [RCTConvert NSString:options[@"outputPath"]];
     BOOL includeMic = [RCTConvert BOOL:options[@"includeMic"]];
     // Absent means mono: the caller owns the product decision, and an older caller that
     // never sends the flag keeps the layout it was written against.
     BOOL stereo = [RCTConvert BOOL:options[@"stereo"]];
     NSArray<NSString *> *remoteTrackIds = [RCTConvert NSStringArray:options[@"remoteTrackIds"]];
     NSArray<NSNumber *> *peerConnectionIds = [RCTConvert NSNumberArray:options[@"peerConnectionIds"]];
-    if (recordingId.length == 0 || wavPath.length == 0 || m4aPath.length == 0) {
-        reject(@"io_error", @"recordingId, wavPath and m4aPath are required", nil);
+
+    // REFUSE THE OLD KEY LOUDLY. `m4aPath` was renamed to `outputPath` when the container
+    // stopped being fixed. Accepting it would mean a stale JS bundle silently writing mp4
+    // bytes to a path called .m4a — playable by nothing, and traceable to nothing.
+    if (outputPath.length == 0 && [RCTConvert NSString:options[@"m4aPath"]].length > 0) {
+        reject(@"io_error", @"startCallRecording: `m4aPath` was renamed to `outputPath`; this JS bundle is too old",
+               nil);
+        return;
+    }
+    if (recordingId.length == 0 || wavPath.length == 0 || outputPath.length == 0) {
+        reject(@"io_error", @"recordingId, wavPath and outputPath are required", nil);
         return;
     }
 
@@ -91,23 +164,62 @@ RCT_EXPORT_METHOD(startCallRecording : (NSDictionary *)options
         return;
     }
 
+    CallVideoRecordingConfig *videoConfig = [self videoConfigFromOptions:options[@"video"]];
+
     NSError *error = nil;
     if (![manager startRecordingWithId:recordingId
                                wavPath:wavPath
-                               m4aPath:m4aPath
+                            outputPath:outputPath
                             includeMic:wantMic
                                 stereo:stereo
                           remoteTracks:tracks
+                           videoConfig:videoConfig
                                  error:&error]) {
         reject(RejectionCodeForError(error), error.localizedDescription ?: @"Failed to start recording", error);
         return;
     }
-    RCTLogInfo(@"[CallRecording] Started %@ (mic: %d, stereo: %d, remote sources: %lu)",
+    RCTLogInfo(@"[CallRecording] Started %@ (mic: %d, stereo: %d, remote sources: %lu, video: %@)",
                recordingId,
                wantMic,
                stereo,
-               (unsigned long)tracks.count);
-    [self sendEventWithName:kEventAudioRecordingStarted body:@{@"recordingId" : recordingId}];
+               (unsigned long)tracks.count,
+               videoConfig ? [NSString stringWithFormat:@"%ldx%ld@%ld", (long)videoConfig.width,
+                                                        (long)videoConfig.height, (long)videoConfig.fps]
+                           : @"no");
+    [self sendEventWithName:kEventAudioRecordingStarted
+                       body:@{@"recordingId" : recordingId, @"withVideo" : @(videoConfig != nil)}];
+    resolve(nil);
+}
+
+RCT_EXPORT_METHOD(updateCallRecordingVideoSources : (NSString *)recordingId
+                  sources : (NSDictionary *)sources
+                  resolver : (RCTPromiseResolveBlock)resolve
+                  rejecter : (RCTPromiseRejectBlock)reject) {
+    // NO-OP RATHER THAN REJECT on an unknown id or an audio-only segment — the caller is
+    // reporting that its sources changed, not asserting a compositor exists to hear it. The
+    // manager makes the same decision; this just resolves whatever it does.
+    NSArray<NSNumber *> *pcHints = [RCTConvert NSNumberArray:sources[@"peerConnectionIds"]];
+
+    RTCVideoTrack *localTrack = nil;
+    NSString *localId = [RCTConvert NSString:sources[@"localTrackId"]];
+    if (localId.length > 0) {
+        RTCMediaStreamTrack *local = self.localTracks[localId];
+        if ([local isKindOfClass:[RTCVideoTrack class]]) {
+            localTrack = (RTCVideoTrack *)local;
+        }
+    }
+
+    NSMutableArray<RTCVideoTrack *> *remotes = [NSMutableArray new];
+    for (NSString *trackId in [RCTConvert NSStringArray:sources[@"remoteTrackIds"]]) {
+        RTCVideoTrack *track = [self videoTrackForRecording:trackId hints:pcHints];
+        if (track != nil && ![remotes containsObject:track]) {
+            [remotes addObject:track];
+        }
+    }
+
+    [[CallAudioRecordingManager sharedManager] updateVideoSources:recordingId
+                                                       localTrack:localTrack
+                                                     remoteTracks:remotes];
     resolve(nil);
 }
 
@@ -169,7 +281,13 @@ RCT_EXPORT_METHOD(finalizeOrphanRecording : (NSString *)wavPath
             reject(RejectionCodeForError(error), error.localizedDescription ?: @"Failed to salvage recording", error);
             return;
         }
-        resolve(result);
+        // ALWAYS audio, by construction: the WAV is the only thing a crash leaves recoverable,
+        // so a salvaged video segment comes back as its sound. Stamped rather than left off so
+        // the result reads like every other one on this surface.
+        NSMutableDictionary *payload = [result mutableCopy];
+        payload[@"withVideo"] = @NO;
+        payload[@"mimeType"] = @"audio/mp4";
+        resolve(payload);
     });
 }
 

@@ -326,13 +326,13 @@ RCT_EXPORT_METHOD(peerConnectionAddICECandidate : (nonnull NSNumber *)objectID c
 }
 
 /** Mirrors Android PeerConnectionObserver.close(): recording sinks must come off
-    a connection's remote audio tracks before the tracks can be torn down. */
+    a connection's remote tracks before the tracks can be torn down. AUDIO AND VIDEO — a
+    video recording attaches a renderer to the remote camera tracks the same way, and the
+    kind test that used to be here would have left those attached to a dead track. */
 - (void)detachRecordingSinksForPeerConnection:(RTCPeerConnection *)peerConnection {
     CallAudioRecordingManager *manager = [CallAudioRecordingManager sharedManager];
     for (RTCMediaStreamTrack *track in peerConnection.remoteTracks.allValues) {
-        if ([track isKindOfClass:[RTCAudioTrack class]]) {
-            [manager detachSinksForTrack:(RTCAudioTrack *)track];
-        }
+        [manager detachSinksForTrack:track];
     }
 }
 

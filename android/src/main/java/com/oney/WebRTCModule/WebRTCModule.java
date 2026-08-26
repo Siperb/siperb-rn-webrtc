@@ -159,6 +159,23 @@ public class WebRTCModule extends ReactContextBaseJavaModule {
         return "WebRTCModule";
     }
 
+    /**
+     * Synchronous capability facts JS can read without a round trip.
+     *
+     * `callRecordingSupportsVideo` is what CallRecorder.supportsVideo answers from. A CONSTANT
+     * rather than a probe on some proxy method, because it states the fact directly: an OTA JS
+     * bundle can reach an app binary older than this file, where the key is simply absent and
+     * reads as false. Version skew is then handled by construction rather than by a check
+     * someone has to remember to write.
+     */
+    @Nullable
+    @Override
+    public Map<String, Object> getConstants() {
+        Map<String, Object> constants = new HashMap<>();
+        constants.put("callRecordingSupportsVideo", true);
+        return constants;
+    }
+
     private PeerConnection getPeerConnection(int id) {
         PeerConnectionObserver pco = mPeerConnectionObservers.get(id);
         return (pco == null) ? null : pco.getPeerConnection();
@@ -1624,7 +1641,7 @@ public class WebRTCModule extends ReactContextBaseJavaModule {
         ThreadUtils.runOnExecutor(() -> {
             String recordingId = options.hasKey("recordingId") ? options.getString("recordingId") : null;
             String wavPath = options.hasKey("wavPath") ? options.getString("wavPath") : null;
-            String m4aPath = options.hasKey("m4aPath") ? options.getString("m4aPath") : null;
+            String outputPath = options.hasKey("outputPath") ? options.getString("outputPath") : null;
             boolean includeMic = options.hasKey("includeMic") && options.getBoolean("includeMic");
             // Absent means mono: the caller owns the product decision, and an older caller
             // that never sends the flag keeps the layout it was written against.
@@ -1633,16 +1650,132 @@ public class WebRTCModule extends ReactContextBaseJavaModule {
             ReadableArray peerConnectionIds =
                     options.hasKey("peerConnectionIds") ? options.getArray("peerConnectionIds") : null;
 
-            if (recordingId == null || wavPath == null || m4aPath == null) {
-                promise.reject("io_error", "startCallRecording requires recordingId, wavPath and m4aPath");
+            // REFUSE THE OLD KEY LOUDLY. `m4aPath` was renamed to `outputPath` when the
+            // container stopped being fixed. Accepting it would mean a stale JS bundle
+            // silently writing mp4 bytes to a path called .m4a — playable by nothing, and
+            // traceable to nothing.
+            if (outputPath == null && options.hasKey("m4aPath")) {
+                promise.reject("io_error",
+                        "startCallRecording: `m4aPath` was renamed to `outputPath`; this JS bundle is too old");
+                return;
+            }
+            if (recordingId == null || wavPath == null || outputPath == null) {
+                promise.reject("io_error", "startCallRecording requires recordingId, wavPath and outputPath");
                 return;
             }
 
             List<Pair<AudioTrack, Integer>> remoteAudioTracks =
                     resolveRemoteAudioTracks(remoteTrackIds, peerConnectionIds);
+            CallAudioRecordingManager.VideoRecordingRequest video =
+                    resolveVideoRequest(options.hasKey("video") ? options.getMap("video") : null);
             mCallAudioRecordingManager.startRecording(
-                    recordingId, wavPath, m4aPath, includeMic, stereo, remoteAudioTracks, promise);
+                    recordingId, wavPath, outputPath, includeMic, stereo, remoteAudioTracks, video, promise);
         });
+    }
+
+    /**
+     * Swap the composited video sources for a live segment. Resolves either way — a no-op on
+     * an audio-only segment or an unknown id, because the caller is reporting a source change
+     * and not asserting that a compositor exists to hear it.
+     */
+    @ReactMethod
+    public void updateCallRecordingVideoSources(String recordingId, ReadableMap sources, Promise promise) {
+        ThreadUtils.runOnExecutor(() -> {
+            CallAudioRecordingManager.VideoRecordingRequest resolved = resolveVideoRequest(sources);
+            if (resolved == null) {
+                mCallAudioRecordingManager.updateVideoSources(recordingId, null, new ArrayList<>());
+            } else {
+                mCallAudioRecordingManager.updateVideoSources(
+                        recordingId, resolved.localTrack, resolved.remoteTracks);
+            }
+            promise.resolve(null);
+        });
+    }
+
+    /**
+     * Builds the video request from the JS `video` block, or null for an audio-only segment.
+     *
+     * RESOLVING NOTHING IS NOT AN ERROR. A camera that is off and a remote that has not
+     * started sending both land here with no tracks, and the honest outcome is an audio
+     * recording that SAYS it has no video — not a refused segment. Must run on the executor.
+     */
+    @Nullable
+    private CallAudioRecordingManager.VideoRecordingRequest resolveVideoRequest(@Nullable ReadableMap video) {
+        if (video == null) {
+            return null;
+        }
+        ReadableArray pcHints = video.hasKey("peerConnectionIds") ? video.getArray("peerConnectionIds") : null;
+
+        CallAudioRecordingManager.VideoRecordingRequest request =
+                new CallAudioRecordingManager.VideoRecordingRequest();
+        request.width = video.hasKey("width") ? video.getInt("width") : 0;
+        request.height = video.hasKey("height") ? video.getInt("height") : 0;
+        request.fps = video.hasKey("fps") ? video.getInt("fps") : 0;
+        request.pnpSize = video.hasKey("pnpSize") ? video.getInt("pnpSize") : 0;
+        request.layout = video.hasKey("layout") ? video.getString("layout") : null;
+
+        // The local camera / presentation track is a LOCAL track, so it is not in any peer
+        // connection's remoteTracks — getLocalTrack is the only place it lives.
+        String localId = video.hasKey("localTrackId") ? video.getString("localTrackId") : null;
+        if (localId != null) {
+            MediaStreamTrack local = getLocalTrack(localId);
+            if (local instanceof VideoTrack) {
+                request.localTrack = (VideoTrack) local;
+            } else {
+                Log.w(TAG, "startCallRecording: local video track not found: " + localId);
+            }
+        }
+
+        ReadableArray remoteIds = video.hasKey("remoteTrackIds") ? video.getArray("remoteTrackIds") : null;
+        if (remoteIds != null) {
+            for (int i = 0; i < remoteIds.size(); i++) {
+                String trackId = remoteIds.getString(i);
+                if (trackId == null) {
+                    continue;
+                }
+                MediaStreamTrack track = findRemoteTrack(trackId, pcHints);
+                if (!(track instanceof VideoTrack)) {
+                    Log.w(TAG, "startCallRecording: remote video track not found, skipping: " + trackId);
+                    continue;
+                }
+                if (!request.remoteTracks.contains(track)) {
+                    request.remoteTracks.add((VideoTrack) track);
+                }
+            }
+        }
+
+        if (request.localTrack == null && request.remoteTracks.isEmpty()) {
+            Log.w(TAG, "startCallRecording: video requested but no video track resolved — recording audio only");
+            return null;
+        }
+        if (request.width <= 0 || request.height <= 0 || request.fps <= 0) {
+            Log.w(TAG, "startCallRecording: video block has no usable geometry — recording audio only");
+            return null;
+        }
+        return request;
+    }
+
+    /** Hinted-then-exhaustive remote track lookup, shared by the audio and video resolvers. */
+    @Nullable
+    private MediaStreamTrack findRemoteTrack(String trackId, @Nullable ReadableArray pcIdHints) {
+        if (pcIdHints != null) {
+            for (int j = 0; j < pcIdHints.size(); j++) {
+                PeerConnectionObserver pco = mPeerConnectionObservers.get(pcIdHints.getInt(j));
+                if (pco != null) {
+                    MediaStreamTrack candidate = pco.remoteTracks.get(trackId);
+                    if (candidate != null) {
+                        return candidate;
+                    }
+                }
+            }
+        }
+        for (int j = 0; j < mPeerConnectionObservers.size(); j++) {
+            MediaStreamTrack candidate = mPeerConnectionObservers.valueAt(j).remoteTracks.get(trackId);
+            if (candidate != null) {
+                return candidate;
+            }
+        }
+        return null;
     }
 
     /**

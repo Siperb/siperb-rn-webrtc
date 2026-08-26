@@ -28,6 +28,19 @@ typedef NS_ENUM(NSInteger, CallRecordingErrorCode) {
 @property(nonatomic, readonly) BOOL includesMic;
 @property(nonatomic, readonly) BOOL stereo;
 
+/**
+ * Fan-out of the mixed tick, for a consumer that needs the SAME audio rather than its own.
+ *
+ * The one caller is CallVideoRecorder, which muxes this into its mp4. It exists so there is
+ * ONE mixer with two consumers: a second tap on the same tracks would be a second mix, and two
+ * mixes of one call drift — the mp4's audio and the WAV's would stop being the same recording.
+ *
+ * Called on the writer queue every 10 ms with the interleaved int16 mix in this recorder's
+ * channel layout (`stereo` above says which). The buffer is per-tick scratch and is overwritten
+ * immediately: COPY IT, never retain the pointer. Set before `start:`.
+ */
+@property(nonatomic, copy, nullable) void (^pcmTap)(const int16_t *samples, NSUInteger count);
+
 - (instancetype)initWithRecordingId:(NSString *)recordingId
                             wavPath:(NSString *)wavPath
                             m4aPath:(NSString *)m4aPath

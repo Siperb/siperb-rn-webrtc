@@ -62,13 +62,31 @@ class PeerConnectionObserver implements PeerConnection.Observer {
         this.peerConnection = peerConnection;
     }
 
+    /**
+     * Takes every call-recording sink off this connection's remote tracks.
+     *
+     * Two halves because they are held in different places: the AUDIO sinks belong to the
+     * recorders and are found by connection id, while the VIDEO sinks belong to the manager
+     * and are found by track. Missing the video half leaves a renderer attached to a track
+     * that is about to be disposed, which is the crash this whole hook exists to prevent.
+     */
+    private void detachRecordingSinks() {
+        webRTCModule.getCallAudioRecordingManager().detachSinksForPeerConnection(id);
+        for (MediaStreamTrack track : this.remoteTracks.values()) {
+            if (track instanceof VideoTrack) {
+                webRTCModule.getCallAudioRecordingManager().detachVideoSinksForTrack((VideoTrack) track);
+            }
+        }
+    }
+
     void close() {
         Log.d(TAG, "PeerConnection.close() for " + id);
 
         // Detach any call-recording sinks from this connection's remote tracks before
         // teardown starts: a sink attached to (or removed from) a disposed track crashes.
-        // Affected recorders keep running zero-padded until JS stops them.
-        webRTCModule.getCallAudioRecordingManager().detachSinksForPeerConnection(id);
+        // Affected recorders keep running — audio zero-padded, video drawing black — until
+        // JS stops them.
+        detachRecordingSinks();
 
         peerConnection.close();
     }
@@ -77,7 +95,7 @@ class PeerConnectionObserver implements PeerConnection.Observer {
         Log.d(TAG, "PeerConnection.dispose() for " + id);
 
         // Defensive re-detach for any path that disposes without close(); no-op otherwise.
-        webRTCModule.getCallAudioRecordingManager().detachSinksForPeerConnection(id);
+        detachRecordingSinks();
 
         // Remove video track adapters
         for (MediaStreamTrack track : this.remoteTracks.values()) {
