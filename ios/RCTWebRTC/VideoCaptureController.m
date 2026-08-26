@@ -181,6 +181,18 @@
     }
 
     if (self.running && hasChanged) {
+        // STOP BEFORE START, always. startCapture on a still-running capturer adds a
+        // SECOND connection to the capture session's single AVCaptureVideoDataOutput.
+        // A plain AVCaptureSession tolerates that; an AVCaptureMultiCamSession — which
+        // RTCCameraVideoCapturer uses on hardware that supports it — throws
+        // NSInvalidArgumentException instead, and that is an Objective-C exception, so
+        // a JS caller cannot contain it and the whole app is killed. Reproduced by
+        // flipping the camera mid-call on a multicam device.
+        //
+        // Guarded by `self.running`, so a controller that was deliberately stopped
+        // (video muted, track disabled) still only records the new constraints here and
+        // stays off — restarting it would turn the camera back on behind the user.
+        [self stopCapture];
         [self startCapture];
     }
 }
