@@ -139,6 +139,20 @@ export function uniqueID(): string {
 }
 
 /**
+ * Builds an Error carrying a DOMException name (`InvalidStateError`, `NotSupportedError`, ...).
+ *
+ * Hermes has no DOMException. Web code keys its handling off `error.name`, which is what W3C
+ * exceptions carry, so an Error with the right name is the closest honest equivalent.
+ */
+export function makeDOMException(name: string, message: string): Error {
+    const error = new Error(message);
+
+    error.name = name;
+
+    return error;
+}
+
+/**
  * Utility for deep cloning an object. Object.assign() only does a shallow copy.
  *
  * @param {Object} obj - object to be cloned

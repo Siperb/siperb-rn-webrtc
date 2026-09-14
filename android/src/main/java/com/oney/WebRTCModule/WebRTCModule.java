@@ -26,6 +26,7 @@ import com.oney.WebRTCModule.webrtcutils.H264AndSoftwareVideoDecoderFactory;
 import com.oney.WebRTCModule.webrtcutils.H264AndSoftwareVideoEncoderFactory;
 
 import java.io.ByteArrayInputStream;
+import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.cert.CertificateFactory;
@@ -189,7 +190,18 @@ public class WebRTCModule extends ReactContextBaseJavaModule {
         Map<String, Object> constants = new HashMap<>();
         constants.put("callRecordingSupportsVideo", true);
         constants.put("displayMediaSupported", isDisplayMediaSupported());
+        constants.put("recordingsDirectory", recordingsDirectory());
         return constants;
+    }
+
+    /**
+     * Where a recording started without paths is written. The app-private FILES dir, not the
+     * cache: the OS may evict cache under pressure, and a call recording cannot be regenerated.
+     * Reported as a constant so JS can find the files (crash salvage scans it); created lazily
+     * by the first recording that needs it.
+     */
+    private String recordingsDirectory() {
+        return new File(getReactApplicationContext().getFilesDir(), "siperb-rn-webrtc/recordings").getPath();
     }
 
     private boolean isDisplayMediaSupported() {
@@ -1695,9 +1707,32 @@ public class WebRTCModule extends ReactContextBaseJavaModule {
                         "startCallRecording: `m4aPath` was renamed to `outputPath`; this JS bundle is too old");
                 return;
             }
-            if (recordingId == null || wavPath == null || outputPath == null) {
-                promise.reject("io_error", "startCallRecording requires recordingId, wavPath and outputPath");
+            if (recordingId == null || recordingId.isEmpty()) {
+                promise.reject("io_error", "startCallRecording requires recordingId");
                 return;
+            }
+            // BOTH OR NEITHER. A caller that owns its files gives both paths; the library's
+            // MediaRecorder gives none and records into recordingsDirectory. One of the two on
+            // its own is a caller that forgot something, and a recording written half where
+            // it expects is worse than a refusal.
+            if ((wavPath == null) != (outputPath == null)) {
+                promise.reject("io_error", "startCallRecording: give both wavPath and outputPath, or neither");
+                return;
+            }
+            if (wavPath == null) {
+                // The id becomes a file name; a path in it would escape the directory.
+                if (recordingId.contains("/") || recordingId.contains("..")) {
+                    promise.reject("io_error", "startCallRecording: recordingId must not contain '/' or '..'");
+                    return;
+                }
+                File dir = new File(recordingsDirectory());
+                if (!dir.isDirectory() && !dir.mkdirs()) {
+                    promise.reject("io_error", "startCallRecording: could not create " + dir.getPath());
+                    return;
+                }
+                wavPath = new File(dir, recordingId + ".wav").getPath();
+                boolean wantsVideo = options.hasKey("video") && !options.isNull("video");
+                outputPath = new File(dir, recordingId + (wantsVideo ? ".mp4" : ".m4a")).getPath();
             }
 
             List<Pair<AudioTrack, Integer>> remoteAudioTracks =

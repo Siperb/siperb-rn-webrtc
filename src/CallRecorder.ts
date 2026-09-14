@@ -57,18 +57,23 @@ export interface CallRecordingOptions {
      * segment, audio or video, because it is the only crash-recoverable copy — an mp4's
      * moov atom is written at stop, so a killed process leaves the mp4 unplayable and this
      * is what `finalizeOrphan` salvages.
+     *
+     * OPTIONAL TOGETHER WITH `outputPath`: give both, or neither. With neither, native writes
+     * `<recordingId>.wav` and `<recordingId>.m4a|.mp4` under {@link CallRecorder.recordingsDirectory}
+     * and creates that directory. One without the other is rejected with `io_error`.
      */
-    wavPath: string;
+    wavPath?: string;
     /**
      * Absolute path of the finalized container written on stop: AAC `.m4a` for an audio-only
      * segment, H.264 + AAC `.mp4` when `video` is present. The caller picks the extension to
      * match what it asked for; native writes to the path it is given and never rewrites it.
+     * Optional together with `wavPath`, see there.
      *
      * WAS `m4aPath`. Renamed when the container stopped being fixed — native rejects an
      * options object carrying the old key and not this one, loudly, rather than accepting it
      * and writing mp4 bytes to a path called `.m4a`.
      */
-    outputPath: string;
+    outputPath?: string;
     /** Mix the local microphone into the recording. */
     includeMic: boolean;
     /**
@@ -147,6 +152,14 @@ export default class CallRecorder {
      * rather than by a probe that has to remember to be written.
      */
     static readonly supportsVideo: boolean = WebRTCModule?.callRecordingSupportsVideo === true;
+
+    /**
+     * Where native writes a recording whose `start()` gave no paths — the app-private files
+     * directory plus `siperb-rn-webrtc/recordings`. A native constant like `supportsVideo`, and
+     * `null` on a binary that predates default paths (such a binary still requires both paths).
+     */
+    static readonly recordingsDirectory: string | null =
+        typeof WebRTCModule?.recordingsDirectory === 'string' ? WebRTCModule.recordingsDirectory : null;
 
     /**
      * Start recording. Resolves once the native recorder is attached and the

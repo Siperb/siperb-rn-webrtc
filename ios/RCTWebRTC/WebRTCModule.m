@@ -44,7 +44,19 @@
     return @{
         @"callRecordingSupportsVideo" : @YES,
         @"displayMediaSupported" : @([self isDisplayMediaSupported]),
+        @"recordingsDirectory" : [WebRTCModule recordingsDirectory],
     };
+}
+
+/**
+ * Where a recording started without paths is written. Application Support, not Caches: the OS
+ * may evict caches under pressure, and a call recording cannot be regenerated. Reported as a
+ * constant so JS can find the files (crash salvage scans it); created lazily by the first
+ * recording that needs it (startCallRecording).
+ */
++ (NSString *)recordingsDirectory {
+    NSString *support = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES).firstObject;
+    return [[support stringByAppendingPathComponent:@"siperb-rn-webrtc"] stringByAppendingPathComponent:@"recordings"];
 }
 
 /**

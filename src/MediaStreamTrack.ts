@@ -57,6 +57,13 @@ export default class MediaStreamTrack extends EventTarget<MediaStreamTrackEventM
     readonly label: string = '';
     readonly remote: boolean;
 
+    /**
+     * True for tracks that exist only in JS, such as the mixed output of an AudioContext
+     * (MixedAudioTrack). Native has no object for them, so MediaStream and the peer connection
+     * must not send their ids across the bridge.
+     */
+    _isVirtual = false;
+
     constructor(info: MediaStreamTrackInfo) {
         super();
 
@@ -76,8 +83,11 @@ export default class MediaStreamTrack extends EventTarget<MediaStreamTrackEventM
         }
     }
 
+    // `this as MediaStreamTrack` (here and below) pins the handler's `this` type to the base class.
+    // Left polymorphic, a subclass instance (MixedAudioTrack) would not be assignable to
+    // MediaStreamTrack because the callback's `this` parameter is contravariant.
     get onended() {
-        return getEventAttributeValue(this, 'ended');
+        return getEventAttributeValue(this as MediaStreamTrack, 'ended');
     }
 
     set onended(value) {
@@ -85,7 +95,7 @@ export default class MediaStreamTrack extends EventTarget<MediaStreamTrackEventM
     }
 
     get onmute() {
-        return getEventAttributeValue(this, 'mute');
+        return getEventAttributeValue(this as MediaStreamTrack, 'mute');
     }
 
     set onmute(value) {
@@ -93,7 +103,7 @@ export default class MediaStreamTrack extends EventTarget<MediaStreamTrackEventM
     }
 
     get onunmute() {
-        return getEventAttributeValue(this, 'unmute');
+        return getEventAttributeValue(this as MediaStreamTrack, 'unmute');
     }
 
     set onunmute(value) {

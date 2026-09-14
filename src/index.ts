@@ -8,6 +8,11 @@ if (WebRTCModule === null) {
     }`);
 }
 
+import AudioContext from './AudioContext';
+import AudioDestinationNode from './AudioDestinationNode';
+import AudioNode from './AudioNode';
+import AudioParam from './AudioParam';
+import BlobEvent from './BlobEvent';
 import CallRecorder, {
     type CallRecordingLayout,
     type CallRecordingOptions,
@@ -15,13 +20,20 @@ import CallRecorder, {
     type CallVideoRecordingOptions,
     type CallVideoSources,
 } from './CallRecorder';
+import ChannelMergerNode from './ChannelMergerNode';
 import ConferenceMixer from './ConferenceMixer';
 import { setupNativeEvents } from './EventEmitter';
+import GainNode from './GainNode';
 import Logger from './Logger';
 import mediaDevices from './MediaDevices';
+import MediaRecorder from './MediaRecorder';
+import MediaRecorderErrorEvent from './MediaRecorderErrorEvent';
 import MediaStream from './MediaStream';
+import MediaStreamAudioDestinationNode from './MediaStreamAudioDestinationNode';
+import MediaStreamAudioSourceNode from './MediaStreamAudioSourceNode';
 import MediaStreamTrack, { type MediaTrackSettings } from './MediaStreamTrack';
 import MediaStreamTrackEvent from './MediaStreamTrackEvent';
+import MixedAudioTrack from './MixedAudioTrack';
 import permissions from './Permissions';
 import RTCAudioSession from './RTCAudioSession';
 import RTCCertificate from './RTCCertificate';
@@ -37,6 +49,13 @@ import RTCRtpSender from './RTCRtpSender';
 import RTCRtpTransceiver from './RTCRtpTransceiver';
 import RTCSessionDescription from './RTCSessionDescription';
 import RTCView, { type RTCVideoViewProps, type RTCIOSPIPOptions } from './RTCView';
+import RecordingBlob from './RecordingBlob';
+import {
+    type MediaRecorderOptions,
+    type MediaRecorderVideoOptions,
+    type NativeRecordingHandle,
+    type RecordingRequest,
+} from './RecordingRequest';
 import ScreenCapturePickerView from './ScreenCapturePickerView';
 
 Logger.enable(`${Logger.ROOT_PREFIX}:*`);
@@ -67,6 +86,23 @@ export {
     type CallRecordingResult,
     type CallVideoRecordingOptions,
     type CallVideoSources,
+    AudioContext,
+    AudioNode,
+    AudioParam,
+    AudioDestinationNode,
+    GainNode,
+    ChannelMergerNode,
+    MediaStreamAudioSourceNode,
+    MediaStreamAudioDestinationNode,
+    MixedAudioTrack,
+    MediaRecorder,
+    RecordingBlob,
+    BlobEvent,
+    MediaRecorderErrorEvent,
+    type MediaRecorderOptions,
+    type MediaRecorderVideoOptions,
+    type NativeRecordingHandle,
+    type RecordingRequest,
     MediaStream,
     MediaStreamTrack,
     type MediaTrackSettings,
@@ -108,4 +144,21 @@ function registerGlobals(): void {
     global.RTCRtpReceiver = RTCRtpReceiver;
     global.RTCRtpSender = RTCRtpSender;
     global.RTCErrorEvent = RTCErrorEvent;
+
+    // PUBLISH-OR-DON'T. Web code feature-detects these two by their mere presence, and a
+    // present-but-powerless constructor makes it build a mix or a recording that reports
+    // success carrying nothing. So each is installed only when the native half it drives is in
+    // THIS binary — an OTA JS bundle can be newer than the app around it. A host that installs
+    // its own (a subclass with its conventions) is left alone.
+    if (typeof WebRTCModule.conferenceAttachLeg === 'function' && typeof global.AudioContext !== 'function') {
+        global.AudioContext = AudioContext;
+    }
+
+    // The generic recorder writes to native default paths, which only a binary exporting
+    // `recordingsDirectory` provides; a host subclass supplies its own paths and its own gate.
+    if (typeof WebRTCModule.startCallRecording === 'function'
+        && typeof WebRTCModule.recordingsDirectory === 'string'
+        && typeof global.MediaRecorder !== 'function') {
+        global.MediaRecorder = MediaRecorder;
+    }
 }

@@ -115,6 +115,13 @@ export default class MediaStream extends EventTarget<MediaStreamEventMap> {
         }
 
         this._tracks.push(track);
+
+        // A virtual track (an AudioContext mix) has no native counterpart: the bridge call would
+        // only log "could not find track" on both platforms.
+        if (track._isVirtual) {
+            return;
+        }
+
         WebRTCModule.mediaStreamAddTrack(this._reactTag, track.remote ? track._peerConnectionId : -1, track.id);
     }
 
@@ -126,6 +133,11 @@ export default class MediaStream extends EventTarget<MediaStreamEventMap> {
         }
 
         this._tracks.splice(index, 1);
+
+        if (track._isVirtual) {
+            return;
+        }
+
         WebRTCModule.mediaStreamRemoveTrack(this._reactTag, track.remote ? track._peerConnectionId : -1, track.id);
     }
 

@@ -504,6 +504,13 @@ export default class RTCPeerConnection extends EventTarget<RTCPeerConnectionEven
             throw new Error('Track already exists in a sender');
         }
 
+        if (track._isVirtual) {
+            // Native has no object for an AudioContext mix; the way to send one is
+            // replaceTrack on a sender that already carries a real audio track.
+            throw RTCUtil.makeDOMException('NotSupportedError',
+                'RTCPeerConnection.addTrack: a mixed audio track is attached with replaceTrack, not addTrack');
+        }
+
         const streamIds = streams.map(s => s.id);
         const result = WebRTCModule.peerConnectionAddTrack(this._pcId, track.id, { streamIds });
 

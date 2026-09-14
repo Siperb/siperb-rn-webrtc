@@ -16,6 +16,7 @@ plumbing for the Siperb phone.
 | Video rendering (`RTCView`) | ✅ | ✅ + Picture-in-Picture | ⚠️ | – |
 | In-band DTMF (RFC 4733) | ✅ | ✅ | ⚠️ | ❌ |
 | Native call recording (audio, video) | ✅ | ✅ | ❌ | ❌ |
+| `MediaRecorder` + `AudioContext` (W3C subset over the native recorder/mixer) | ✅ | ✅ | ❌ | ❌ |
 | Native conference mixing | ✅ | ✅ | ❌ | ❌ |
 | CallKit manual audio (`RTCAudioSession`) | – | ✅ | – | – |
 
@@ -87,6 +88,27 @@ Records a call **below the encoder**, so no audio ever crosses the JS bridge.
   events `audioRecordingStarted`, `audioRecordingStopped`, `audioRecordingError`.
 - Recording sinks are detached automatically when a peer connection closes.
 
+### `MediaRecorder` and `AudioContext` — W3C-shaped, natively backed
+For web code that feature-detects them (the shared phone SDK does), the library provides the
+subset such code uses — no DSP in JS, the native recorder and mixer do the work:
+- **`AudioContext`**: `createMediaStreamSource/Destination`, `createGain`, `createChannelMerger`,
+  `connect(dest, output, input)` / `disconnect()`, `gain.value`, `state`, `resume`/`suspend`/`close`,
+  `statechange`. The graph is *declarative*: a destination's stream carries one virtual audio
+  track that stands for whatever is wired to it. Absent on purpose (feature probes must fail):
+  `createMediaElementSource`, oscillators, analysers, `decodeAudioData`, worklets.
+- **`MediaRecorder(stream, options?)`**: `start()`, `stop()`, `state`, `mimeType`, `stream`,
+  `isTypeSupported()` (`audio/mp4`, `video/mp4`), events `start`/`stop`/`dataavailable`/`error`
+  with `BlobEvent` and DOMException-named errors. A virtual mix track compiles to the recorder's
+  options (local sources → mic, remote → tapped tracks, two merger inputs → channel-split stereo);
+  real tracks record directly; video tracks engage the compositor (non-standard `options.video`
+  for geometry). `dataavailable.data` is a `RecordingBlob`: `size`, `type`, plus `path`/`uri` — a
+  file reference, not bytes. One chunk at stop: `pause`/`resume`/`requestData`/`timeslice` throw
+  `NotSupportedError`.
+- **Host seam**: subclass and override `startNative`/`stopNative` to own ids, paths and rows
+  (react-native-siperb-phone does). Defaults write under `CallRecorder.recordingsDirectory`.
+- `registerGlobals()` installs both only when the native recorder / conference bus exist in the
+  binary, and never over a host-installed class.
+
 ### Native conference mixing — `ConferenceMixer`
 Three-way (and N-way) calls mixed natively: each remote party is sent the microphone plus every
 *other* party, never itself. Because one peer-connection factory has one outbound audio path,
@@ -125,6 +147,9 @@ custom video encoder/decoder factories, a custom audio device module (Android) /
 - `applyConstraints()` on audio tracks; audio constraints on iOS.
 - End-of-candidates signalling (`addIceCandidate(null)` is accepted as a no-op).
 - Insertable streams / encoded transforms, identity assertions, Plan B.
+- `AudioContext` is not Web Audio: no sample processing, no scheduling, no `context.destination`
+  playback. Sending a mix track with `RTCRtpSender.replaceTrack` (the conference path) throws
+  `NotSupportedError` until the conference binding lands; the phone's shim covers that today.
 - A microphone failure is reported as `mute`, never `ended`: the engine retries capture on the next session, so the track stays usable and `unmute` follows when it recovers. "Not sending yet" (no peer connection sending) is deliberately not modelled as muted.
 - macOS and tvOS targets are unmaintained; see the table above.
 

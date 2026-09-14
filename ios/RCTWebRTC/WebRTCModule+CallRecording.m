@@ -134,9 +134,37 @@ RCT_EXPORT_METHOD(startCallRecording : (NSDictionary *)options
                nil);
         return;
     }
-    if (recordingId.length == 0 || wavPath.length == 0 || outputPath.length == 0) {
-        reject(@"io_error", @"recordingId, wavPath and outputPath are required", nil);
+    if (recordingId.length == 0) {
+        reject(@"io_error", @"startCallRecording requires recordingId", nil);
         return;
+    }
+    // BOTH OR NEITHER. A caller that owns its files gives both paths; the library's MediaRecorder
+    // gives none and records into recordingsDirectory. One of the two on its own is a caller
+    // that forgot something, and a recording written half where it expects is worse than a
+    // refusal.
+    if ((wavPath.length == 0) != (outputPath.length == 0)) {
+        reject(@"io_error", @"startCallRecording: give both wavPath and outputPath, or neither", nil);
+        return;
+    }
+    if (wavPath.length == 0) {
+        // The id becomes a file name; a path in it would escape the directory.
+        if ([recordingId containsString:@"/"] || [recordingId containsString:@".."]) {
+            reject(@"io_error", @"startCallRecording: recordingId must not contain '/' or '..'", nil);
+            return;
+        }
+        NSString *dir = [WebRTCModule recordingsDirectory];
+        NSError *dirError = nil;
+        if (![[NSFileManager defaultManager] createDirectoryAtPath:dir
+                                       withIntermediateDirectories:YES
+                                                        attributes:nil
+                                                             error:&dirError]) {
+            reject(@"io_error", [NSString stringWithFormat:@"startCallRecording: could not create %@", dir], dirError);
+            return;
+        }
+        BOOL wantsVideo = [options[@"video"] isKindOfClass:[NSDictionary class]];
+        wavPath = [dir stringByAppendingPathComponent:[recordingId stringByAppendingPathExtension:@"wav"]];
+        outputPath = [dir stringByAppendingPathComponent:
+                              [recordingId stringByAppendingPathExtension:wantsVideo ? @"mp4" : @"m4a"]];
     }
 
     CallAudioRecordingManager *manager = [CallAudioRecordingManager sharedManager];

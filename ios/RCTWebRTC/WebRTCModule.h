@@ -55,4 +55,7 @@ static NSString *const kEventAudioRecordingError = @"audioRecordingError";
 
 - (RTCMediaStream *)streamForReactTag:(NSString *)reactTag;
 
+/** Default home of recordings started without paths; also exported as the `recordingsDirectory` constant. */
++ (NSString *)recordingsDirectory;
+
 @end

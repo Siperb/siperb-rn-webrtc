@@ -89,20 +89,47 @@ Notable files:
   `RTCPeerConnection` filters on `pcId` and ignores these; `MediaStreamTrack`
   matches on `trackId`.
 
-## Host shims — what the phone's web-API shims map onto
+## Web-API classes — `AudioContext` and `MediaRecorder`
 
 `react-native-siperb-phone` runs the shared browser SDK (`browser-phone-sdk.min.js`)
-directly in Hermes. Where that SDK gates a feature on a web-platform constructor, the
-phone installs an MDN-shaped shim (`src/providers/windowShims/`) that translates the web
-API into calls on this library. **The shim is bookkeeping; the heavy lifting is here.**
+directly in Hermes, and that SDK gates conference mixing on `window.AudioContext` and
+recording on `typeof MediaRecorder === "function"`. **This library owns the generic,
+W3C-shaped classes; the phone keeps a thin shim carrying only its own conventions.**
 
-| Web API the SDK expects | Shim (react-native-siperb-phone) | Native work (this library) |
+- [`AudioContext.ts`](src/AudioContext.ts) is a **declarative graph**: nodes
+  ([`AudioNode`](src/AudioNode.ts), `GainNode`, `ChannelMergerNode`,
+  `MediaStreamAudioSourceNode`, `MediaStreamAudioDestinationNode`) record how they are
+  wired and process nothing. A destination's `stream` holds one virtual local track
+  ([`MixedAudioTrack`](src/MixedAudioTrack.ts), `_isVirtual`) that never crosses the
+  bridge; consumers read the graph through it ([`MixRecipe.ts`](src/MixRecipe.ts)).
+  Unsupported members (`createMediaElementSource`, oscillators, analysers, …) are
+  absent, not stubbed — the SDK feature-probes them with `typeof`.
+- [`MediaRecorder.ts`](src/MediaRecorder.ts) compiles the stream it is given into a
+  native `CallRecorder` request ([`RecordingRequest.ts`](src/RecordingRequest.ts)): local
+  sources → microphone, remote sources → tapped tracks, a merger with sources on two
+  inputs → channel-split stereo — the SDK's own recording graph compiles to exactly what
+  the hosts used to send by hand. `dataavailable` carries a
+  [`RecordingBlob`](src/RecordingBlob.ts), a Blob-shaped *reference* to the file (`size`,
+  `type`, `path`, `uri`), never its bytes. One chunk at stop; `pause`/`resume`/
+  `requestData`/`timeslice` throw `NotSupportedError`.
+- **The host seam** is two protected methods, `startNative(request)` and
+  `stopNative(handle, reason)`, defaulting to `CallRecorder` with a generated id and
+  native default paths (`CallRecorder.recordingsDirectory`). The phone's shim is a
+  subclass overriding both to route through its `RecordingManager` by `Data.SessionId`
+  — ids, paths, rows, CDR and crash salvage stay in the host.
+- **Conference legs** (`replaceTrack(mixTrack)` → `ConferenceMixer.attachLeg`) are the
+  next slice; until it lands, `replaceTrack` refuses a virtual track with
+  `NotSupportedError` and the phone's `AudioContext` shim keeps doing that job.
+
+| Web API the SDK expects | This library | Native work |
 |---|---|---|
-| `new AudioContext()` — `createMediaStreamSource`, `createMediaStreamDestination`, `createGain`, `createChannelMerger` | `windowShims/AudioContext.ts` — nodes are inert objects; a source built from a leg's own sender stream identifies the leg and calls `attachLeg` | `ConferenceMixer` → `WebRTCModule+Conference` / `SiperbConferenceMixManager` (iOS), the conference audio bus (Android). Mixes below the encoder; the mix is written into the leg's capture buffer, so no track is swapped and no SDP moves |
-| `new MediaRecorder(stream)` — `start()`, `stop()`, `ondataavailable` | `windowShims/MediaRecorder.ts` — ignores the stream, routes start/stop by session id, hands back a Blob-shaped *reference* (path, size, type) at stop | `CallRecorder` → `CallAudioRecorder` + `CallVideoRecorder`. Taps mic and remote sinks natively, writes the crash-safe WAV, encodes, and composites video from the named tracks with the SDK's own layout vocabulary (`them-pnp`, `side-by-side`, …) |
-| `document` | `documentShims/document.ts` — two no-op listener methods, **no `createElement`** | none |
+| `new AudioContext()` — `createMediaStreamSource`, `createMediaStreamDestination`, `createGain`, `createChannelMerger`, `connect`/`disconnect`, `gain.value`, `state`/`resume`/`close` | `AudioContext` + nodes, graph compiled on demand | `ConferenceMixer` → `WebRTCModule+Conference` / `SiperbConferenceMixManager` (iOS), the conference audio bus (Android). Mixes below the encoder; the mix is written into the leg's capture buffer, so no track is swapped and no SDP moves |
+| `new MediaRecorder(stream)` — `start()`, `stop()`, `state`, `ondataavailable`, `onerror` | `MediaRecorder` (state machine, events, request compilation) | `CallRecorder` → `CallAudioRecorder` + `CallVideoRecorder`. Taps mic and remote sinks natively, writes the crash-safe WAV, encodes, and composites video from the named tracks with the SDK's own layout vocabulary (`them-pnp`, `side-by-side`, …) |
+| `document` | — (phone: `documentShims/document.ts`, two no-op listener methods, **no `createElement`**) | none |
 
-Two rules keep this honest, and both are enforced by the phone, not here:
+Two rules keep this honest; `registerGlobals()` now enforces the first here too (it
+installs `AudioContext`/`MediaRecorder` only when the native half exists in this binary,
+and never over a class a host already installed):
 
 - **Publish-or-don't.** Each shim is installed only if the native method it reaches
   exists (`WebRTCModule.conferenceAttachLeg`, `WebRTCModule.startCallRecording`). A truthy

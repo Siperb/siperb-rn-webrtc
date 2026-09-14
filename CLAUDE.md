@@ -27,12 +27,16 @@ to native WebRTC (Jitsi prebuilt WebRTC 124) on Android, iOS, and macOS. It is a
 npm run lint       # eslint (max-warnings 0) + tsc --noEmit
 npm run lintfix    # eslint --fix + tsc --noEmit
 npm run format     # tools/format.sh (clang-format for native, prettier via lint-staged)
-npm run prepare    # husky install && bob build  -> produces lib/
+npm run prepare    # husky install && bob build && postbuild  -> produces lib/
+npm test           # jest over tests/js against a mocked react-native bridge
+./android/tests/run.sh   # pure-Java conference bus assertions (no Android toolchain needed)
 ```
 
-There is **no test suite** — validate changes by building and exercising the
-`examples/` apps (or the Siperb-Mobile consumer). Always run `npm run lint`
-before considering a change done; `tsc --noEmit` is part of it.
+Tests cover the JS layer (`tests/js/`, Jest + ts-jest; `react-native` and `react` are
+stubbed in `tests/js/mocks/`, so nothing native runs) and the pure-Java conference bus.
+Native capture and recording still have to be exercised on a device or through the
+`examples/` apps / the Siperb consumers. Always run `npm run lint` and `npm test`
+before considering a change done; `tsc --noEmit` is part of lint.
 
 ## Key conventions
 

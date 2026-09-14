@@ -1,10 +1,13 @@
 import { NativeModules } from 'react-native';
 
+import Logger from './Logger';
 import MediaStreamTrack from './MediaStreamTrack';
 import RTCDTMFSender from './RTCDTMFSender';
 import RTCRtpCapabilities from './RTCRtpCapabilities';
 import RTCRtpSendParameters, { RTCRtpSendParametersInit } from './RTCRtpSendParameters';
+import { makeDOMException } from './RTCUtil';
 
+const log = new Logger('pc');
 const { WebRTCModule } = NativeModules;
 
 
@@ -31,10 +34,21 @@ export default class RTCRtpSender {
     }
 
     async replaceTrack(track: MediaStreamTrack | null): Promise<void> {
+        if (track?._isVirtual) {
+            // An AudioContext mix has no native track to hand the sender. Sending it means
+            // attaching this peer connection to the native conference bus, which lands with
+            // the conference binding; until then refuse loudly rather than swap in nothing.
+            throw makeDOMException('NotSupportedError',
+                'RTCRtpSender.replaceTrack: a mixed audio track cannot be sent yet (conference binding pending)');
+        }
+
         try {
             await WebRTCModule.senderReplaceTrack(this._peerConnectionId, this._id, track ? track.id : null);
         } catch (e) {
-            return;
+            // Rethrown rather than swallowed: resolving here left `track` pointing at a track
+            // the sender never took, and every later hold/mute toggled the wrong one.
+            log.error(`${this._peerConnectionId} replaceTrack failed`, e as Error);
+            throw e;
         }
 
         this._track = track;
