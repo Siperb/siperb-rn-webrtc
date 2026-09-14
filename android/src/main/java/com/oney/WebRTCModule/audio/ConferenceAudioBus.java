@@ -223,6 +223,12 @@ public final class ConferenceAudioBus {
 
             legs = Collections.unmodifiableMap(nextLegs);
             consumers = Collections.unmodifiableSet(nextConsumers);
+
+            // Mute is a property of the conference, and the last leg leaving IS the end of
+            // the conference. The host detaches leg by leg and never calls clear(), so
+            // without this a hang-up while muted left micMuted true on the process-wide bus
+            // and the NEXT conference opened with the host silently absent from every mix.
+            if (nextLegs.isEmpty()) micMuted = false;
         }
     }
 

@@ -136,6 +136,14 @@ public class BusTest {
         t("a removed leg is out of the sum immediately (expect 700)", out[0] == 700);
         bus.removeLeg("never-added");
         t("removing a leg that was never on the bus is a no-op", true);
+        bus.clear();
+        bus.addLeg("H"); bus.addLeg("C");
+        bus.setMicMuted(true);
+        bus.removeLeg("C");
+        boolean stillMutedWithHostLeft = bus.isMicMuted();
+        bus.removeLeg("H");
+        t("the last leg leaving un-mutes, so the next conference does not start muted",
+                stillMutedWithHostLeft && !bus.isMicMuted());
 
         // --- a late joiner needs no plumbing -------------------------------------
         // This is what removes the attach-track-to-a-running-recording API: the

@@ -37,7 +37,7 @@ The JS layer mirrors the browser API so web WebRTC code ports largely unchanged;
 | `mediaDevices.enumerateDevices()` | Cameras with `facing`; a single placeholder `audioinput` (the OS owns audio routing). |
 | `permissions.request/query({ name })` | `camera`, `microphone`. |
 | `MediaStream` | `addTrack`/`removeTrack`/`getTracks`/`getAudioTracks`/`getVideoTracks`/`getTrackById`, `toURL()` for `RTCView`, and the non-standard `release()` that frees native resources (`track.stop()` alone does not). |
-| `MediaStreamTrack` | `enabled`, `muted`, `readyState`, `stop()`, `getSettings()`, `getConstraints()`, `applyConstraints()` (video only — camera switch/resolution/fps without renegotiation), `mute`/`unmute`/`ended` events. Non-standard: `_switchCamera()`, `_setVolume()` (audio gain 0–10), `_setVideoEffects(names)` (native frame processors registered through `ProcessorProvider`). |
+| `MediaStreamTrack` | `enabled`, `muted`, `readyState`, `stop()`, `getSettings()`, `getConstraints()`, `applyConstraints()` (video only — camera switch/resolution/fps without renegotiation), `mute`/`unmute`/`ended` events. **`muted` on a local audio track reflects the real microphone**: it flips to `true` (with a `mute` event) when capture fails — Android `AudioRecord` init/start/runtime errors; iOS audio-unit start failure, an audio-session interruption, or media-server loss — and back on recovery. A track created while the microphone is failing is born `muted`. Non-standard: `_switchCamera()`, `_setVolume()` (audio gain 0–10), `_setVideoEffects(names)` (native frame processors registered through `ProcessorProvider`). |
 
 ### Peer connection
 
@@ -125,7 +125,7 @@ custom video encoder/decoder factories, a custom audio device module (Android) /
 - `applyConstraints()` on audio tracks; audio constraints on iOS.
 - End-of-candidates signalling (`addIceCandidate(null)` is accepted as a no-op).
 - Insertable streams / encoded transforms, identity assertions, Plan B.
-- Microphone capture failures are not yet surfaced to JS as `mute`/`ended` on the local audio track — a live local audio track cannot currently report a dead capture. (Tracked as a planned improvement.)
+- A microphone failure is reported as `mute`, never `ended`: the engine retries capture on the next session, so the track stays usable and `unmute` follows when it recovers. "Not sending yet" (no peer connection sending) is deliberately not modelled as muted.
 - macOS and tvOS targets are unmaintained; see the table above.
 
 ## More

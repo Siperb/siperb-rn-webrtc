@@ -85,7 +85,9 @@ static const NSUInteger kMaxFrames = 4096;
  * every conference is missing us entirely.
  */
 @interface SiperbLegCaptureMixer : NSObject <RTCAudioCustomProcessingDelegate>
-@property(nonatomic, copy) NSString *legId;
+// ATOMIC: read on the APM capture thread every 10 ms, written from the module queue on
+// attach/detach. A nonatomic object property across threads is a use-after-free window.
+@property(atomic, copy) NSString *legId;
 /** Only the host reads the real microphone; a synthesised leg's capture is discarded. */
 @property(nonatomic, assign) BOOL feedsMicrophone;
 @end

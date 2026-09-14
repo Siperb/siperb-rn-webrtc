@@ -104,6 +104,8 @@
 }
 
 - (void)dealloc {
+    [[RTCAudioSession sharedInstance] removeDelegate:self];
+
     [_localTracks removeAllObjects];
     _localTracks = nil;
     [_localStreams removeAllObjects];
@@ -188,6 +190,12 @@
         dispatch_queue_attr_t attributes =
             dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, -1);
         _workerQueue = dispatch_queue_create("WebRTCModule.queue", attributes);
+
+        // Microphone truth for local audio tracks: the audio device sets `recording` the moment
+        // it is asked to record, whether or not the voice-processing unit actually started, so
+        // the only signals that capture failed or paused are the session delegate's. Weakly
+        // held by RTCAudioSession; removed in dealloc. Handlers in WebRTCModule+RTCAudioSession.
+        [[RTCAudioSession sharedInstance] addDelegate:self];
     }
 
     return self;

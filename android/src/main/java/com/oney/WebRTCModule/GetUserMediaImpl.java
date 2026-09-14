@@ -200,6 +200,17 @@ class GetUserMediaImpl {
         return private_ == null ? null : private_.track;
     }
 
+    /** Ids of the live local audio tracks, for microphone-state fan-out. Executor only. */
+    List<String> getLocalAudioTrackIds() {
+        List<String> ids = new ArrayList<>();
+        for (Map.Entry<String, TrackPrivate> entry : tracks.entrySet()) {
+            if (entry.getValue().track instanceof AudioTrack) {
+                ids.add(entry.getKey());
+            }
+        }
+        return ids;
+    }
+
     /**
      * Implements {@code getUserMedia}. Note that at this point constraints have
      * been normalized and permissions have been granted. The constraints only
@@ -211,6 +222,19 @@ class GetUserMediaImpl {
         AudioTrack audioTrack = null;
         VideoTrack videoTrack = null;
 
+        // Resolved BEFORE the audio track exists: with the check below the audio path, a
+        // video call answered while no Activity is resumed (CallKit/ConnectionService in the
+        // background) created and registered an audio track, then failed the whole request -
+        // leaving a native track and source with no JS handle to ever release them.
+        Activity currentActivity = null;
+        if (constraints.hasKey("video")) {
+            currentActivity = this.reactContext.getCurrentActivity();
+            if (currentActivity == null) {
+                errorCallback.invoke("Error", "No current Activity.");
+                return;
+            }
+        }
+
         if (constraints.hasKey("audio")) {
             audioTrack = createAudioTrack(constraints);
         }
@@ -219,12 +243,6 @@ class GetUserMediaImpl {
             ReadableMap videoConstraintsMap = constraints.getMap("video");
 
             Log.d(TAG, "getUserMedia(video): " + videoConstraintsMap);
-
-            Activity currentActivity = this.reactContext.getCurrentActivity();
-            if (currentActivity == null) {
-                errorCallback.invoke("Error", "No current Activity.");
-                return;
-            }
 
             CameraCaptureController cameraCaptureController = new CameraCaptureController(
                     currentActivity, getCameraEnumerator(), videoConstraintsMap);
@@ -435,6 +453,9 @@ class GetUserMediaImpl {
                 settings.putString("deviceId", "audio-1");
                 settings.putString("groupId", "");
                 trackInfo.putMap("settings", settings);
+                // A track created while the microphone is failing is born muted; the ADM's
+                // next successful start un-mutes it (MicCaptureStateEmitter).
+                trackInfo.putBoolean("muted", webRTCModule.isMicCaptureMuted());
             }
 
             tracksInfo.add(trackInfo);

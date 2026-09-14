@@ -81,6 +81,13 @@ Notable files:
   authoritative list in `NATIVE_EVENTS`, listens via `NativeEventEmitter`, and
   re-broadcasts on an internal `EventEmitter` that the JS objects subscribe to.
   Adding a new native event requires registering it in `NATIVE_EVENTS`.
+- **Local track state:** `mediaStreamTrackMuteChanged` without a `pcId` is a
+  *local* track's `muted` changing — the iOS screen track un-muting when the
+  broadcast extension connects, and every local audio track muting/un-muting
+  as the microphone fails or recovers (`MicCaptureStateEmitter` on Android,
+  `WebRTCModule+RTCAudioSession` as `RTCAudioSessionDelegate` on iOS).
+  `RTCPeerConnection` filters on `pcId` and ignores these; `MediaStreamTrack`
+  matches on `trackId`.
 
 ## Host shims — what the phone's web-API shims map onto
 

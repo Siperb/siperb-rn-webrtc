@@ -25,7 +25,9 @@ static NSString *const kEventAudioRecordingStarted = @"audioRecordingStarted";
 static NSString *const kEventAudioRecordingStopped = @"audioRecordingStopped";
 static NSString *const kEventAudioRecordingError = @"audioRecordingError";
 
-@interface WebRTCModule : RCTEventEmitter<RCTBridgeModule>
+// RTCAudioSessionDelegate: microphone state for local audio tracks, implemented in
+// WebRTCModule+RTCAudioSession.m and registered in init.
+@interface WebRTCModule : RCTEventEmitter<RCTBridgeModule, RTCAudioSessionDelegate>
 
 @property(nonatomic, strong) dispatch_queue_t workerQueue;
 
@@ -38,6 +40,13 @@ static NSString *const kEventAudioRecordingError = @"audioRecordingError";
 @property(nonatomic, strong) RTCDefaultAudioProcessingModule *audioProcessingModule;
 
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, RTCPeerConnection *> *peerConnections;
+
+/**
+ * YES while the microphone is known to be failing (audio unit refused to start, interruption
+ * in progress, media server gone). Confined to workerQueue. Local audio tracks mirror it as
+ * `muted` -- see WebRTCModule+RTCAudioSession.m.
+ */
+@property(nonatomic, assign) BOOL micCaptureMuted;
 
 /** The factory a conference leg must be built on, or nil for the app's own. */
 - (RTCPeerConnectionFactory *)conferenceFactoryForLeg:(NSString *)legId;

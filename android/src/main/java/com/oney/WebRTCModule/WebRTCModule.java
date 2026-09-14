@@ -58,6 +58,8 @@ public class WebRTCModule extends ReactContextBaseJavaModule {
     VideoDecoderFactory mVideoDecoderFactory;
     AudioDeviceModule mAudioDeviceModule;
     private final CallAudioRecordingManager mCallAudioRecordingManager;
+    /** Wired into the default ADM only; with an injected ADM it never fires and reads false. */
+    private final MicCaptureStateEmitter mMicCaptureState = new MicCaptureStateEmitter(this);
 
     // Need to expose the peer connection codec factories here to get capabilities
     private final SparseArray<PeerConnectionObserver> mPeerConnectionObservers;
@@ -120,6 +122,11 @@ public class WebRTCModule extends ReactContextBaseJavaModule {
             adm = JavaAudioDeviceModule.builder(reactContext)
                           .setEnableVolumeLogger(false)
                           .setSamplesReadyCallback(mCallAudioRecordingManager.getMicDispatcher())
+                          // Without these, an AudioRecord that fails to start or dies mid-call
+                          // is a logcat line and a silent call; with them it is `mute` on the
+                          // local audio tracks (see MicCaptureStateEmitter).
+                          .setAudioRecordErrorCallback(mMicCaptureState)
+                          .setAudioRecordStateCallback(mMicCaptureState)
                           .createAudioDeviceModule();
             mCallAudioRecordingManager.setMicCaptureAvailable(true);
         } else {
@@ -209,6 +216,16 @@ public class WebRTCModule extends ReactContextBaseJavaModule {
 
     CallAudioRecordingManager getCallAudioRecordingManager() {
         return mCallAudioRecordingManager;
+    }
+
+    /** True while the default ADM reports the microphone as failing. */
+    boolean isMicCaptureMuted() {
+        return mMicCaptureState.isMuted();
+    }
+
+    /** Must be called on the executor; the track registry is confined to it. */
+    List<String> getLocalAudioTrackIds() {
+        return getUserMediaImpl == null ? Collections.emptyList() : getUserMediaImpl.getLocalAudioTrackIds();
     }
 
     private PeerConnection.IceServer createIceServer(String url) {

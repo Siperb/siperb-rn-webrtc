@@ -215,11 +215,20 @@ static const NSUInteger kMaxFrames = 4096;
     [_legs removeObjectForKey:legId];
     [_consumers removeObject:legId];
     NSArray<SiperbBusSource *> *remaining = _legs.allValues;
+    const BOOL lastLegGone = _legs.count == 0;
     os_unfair_lock_unlock(&_legLock);
 
     [_mic removeConsumer:legId];
     for (SiperbBusSource *source in remaining) {
         [source removeConsumer:legId];
+    }
+
+    // Mute is a property of the conference, and the last leg leaving IS the end of the
+    // conference. The host detaches leg by leg and never calls clear, so without this a
+    // hang-up while muted left micMuted YES on the process-wide bus and the NEXT conference
+    // opened with the host silently absent from every mix.
+    if (lastLegGone) {
+        self.micMuted = NO;
     }
 }
 

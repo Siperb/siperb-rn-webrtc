@@ -271,10 +271,15 @@ RCT_EXPORT_METHOD(getUserMedia : (NSDictionary *)constraints successCallback : (
             };
         }
 
+        // An audio track created while the microphone is failing is born muted; the session
+        // delegate un-mutes it when capture recovers (WebRTCModule+RTCAudioSession.m).
+        BOOL muted = [track.kind isEqualToString:@"audio"] && self.micCaptureMuted;
+
         [tracks addObject:@{
             @"enabled" : @(track.isEnabled),
             @"id" : trackId,
             @"kind" : track.kind,
+            @"muted" : @(muted),
             @"readyState" : @"live",
             @"remote" : @(NO),
             @"settings" : settings

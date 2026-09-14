@@ -42,6 +42,7 @@ RCT_EXPORT_METHOD(senderReplaceTrack : (nonnull NSNumber *)objectID senderId : (
     if (peerConnection == nil) {
         RCTLogWarn(@"PeerConnection %@ not found in senderReplaceTrack()", objectID);
         reject(@"E_INVALID", @"Peer Connection is not initialized", nil);
+        return;
     }
 
     RTCRtpTransceiver *transceiver = nil;
@@ -54,7 +55,8 @@ RCT_EXPORT_METHOD(senderReplaceTrack : (nonnull NSNumber *)objectID senderId : (
 
     if (transceiver == nil) {
         RCTLogWarn(@"senderReplaceTrack() transceiver is null");
-        reject(@"E_INVALID", @"Could not get transceive", nil);
+        reject(@"E_INVALID", @"Could not get transceiver", nil);
+        return;
     }
 
     RTCRtpSender *sender = transceiver.sender;
