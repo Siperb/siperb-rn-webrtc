@@ -34,6 +34,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 /**
@@ -74,6 +75,15 @@ class GetUserMediaImpl {
             public void onActivityResult(Activity activity, int requestCode, int resultCode, Intent data) {
                 super.onActivityResult(activity, requestCode, resultCode, data);
                 if (requestCode == PERMISSION_REQUEST_CODE) {
+                    // Guard against a duplicate onActivityResult dispatch. Some hosts (e.g.
+                    // react-native-navigation) forward the activity result to every registered
+                    // ActivityEventListener more than once, so this callback can fire twice for a
+                    // single getDisplayMedia() request. The first pass consumes displayMediaPromise;
+                    // a second pass would call reject()/resolve() on a null promise and crash.
+                    if (displayMediaPromise == null) {
+                        return;
+                    }
+
                     if (resultCode != Activity.RESULT_OK) {
                         displayMediaPromise.reject("DOMException", "NotAllowedError");
                         displayMediaPromise = null;
@@ -82,10 +92,19 @@ class GetUserMediaImpl {
 
                     mediaProjectionPermissionResultData = data;
 
-                    ThreadUtils.runOnExecutor(() -> {
-                        MediaProjectionService.launch(activity);
-                        createScreenStream();
-                    });
+                    MediaProjectionService.launch(activity)
+                        .orTimeout(10, TimeUnit.SECONDS)
+                        .whenCompleteAsync((value, error) -> {
+                            if (error != null) {
+                                Log.e(TAG, "Failed to start MediaProjection service", error);
+                                displayMediaPromise.reject("DOMException", "AbortError");
+                                displayMediaPromise = null;
+                                mediaProjectionPermissionResultData = null;
+                                return;
+                            }
+
+                            createScreenStream();
+                        }, ThreadUtils.getExecutor());
                 }
             }
         });
@@ -347,6 +366,14 @@ class GetUserMediaImpl {
     }
 
     private void createScreenStream() {
+        // A duplicate onActivityResult dispatch (see onActivityResult above) can schedule this more
+        // than once. The single-threaded executor runs them in order, so by the time a duplicate
+        // runs the first has already consumed displayMediaPromise. Bail out instead of dereferencing
+        // a null promise or creating a second screen stream.
+        if (displayMediaPromise == null) {
+            return;
+        }
+
         VideoTrack track = createScreenTrack();
 
         if (track == null) {
