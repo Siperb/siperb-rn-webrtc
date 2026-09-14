@@ -1,4 +1,5 @@
 import type AudioContext from './AudioContext';
+import { unbindMixedTrack } from './ConferenceLegBinding';
 import type MediaStreamAudioDestinationNode from './MediaStreamAudioDestinationNode';
 import MediaStreamTrack from './MediaStreamTrack';
 import { makeDOMException, uniqueID } from './RTCUtil';
@@ -53,6 +54,8 @@ export default class MixedAudioTrack extends MediaStreamTrack {
     override stop(): void {
         this._enabled = false;
         this._readyState = 'ended';
+        // A stopped track must not keep a leg on the bus.
+        unbindMixedTrack(this);
     }
 
     override release(): void {

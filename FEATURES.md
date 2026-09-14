@@ -16,7 +16,7 @@ plumbing for the Siperb phone.
 | Video rendering (`RTCView`) | ✅ | ✅ + Picture-in-Picture | ⚠️ | – |
 | In-band DTMF (RFC 4733) | ✅ | ✅ | ⚠️ | ❌ |
 | Native call recording (audio, video) | ✅ | ✅ | ❌ | ❌ |
-| `MediaRecorder` + `AudioContext` (W3C subset over the native recorder/mixer) | ✅ | ✅ | ❌ | ❌ |
+| `MediaRecorder` + `AudioContext` (W3C subset over the native recorder/mixer, incl. `replaceTrack(mix)` → conference leg) | ✅ | ✅ | ❌ | ❌ |
 | Native conference mixing | ✅ | ✅ | ❌ | ❌ |
 | CallKit manual audio (`RTCAudioSession`) | – | ✅ | – | – |
 
@@ -106,6 +106,12 @@ subset such code uses — no DSP in JS, the native recorder and mixer do the wor
   `NotSupportedError`.
 - **Host seam**: subclass and override `startNative`/`stopNative` to own ids, paths and rows
   (react-native-siperb-phone does). Defaults write under `CallRecorder.recordingsDirectory`.
+- **Conference via `replaceTrack`**: `sender.replaceTrack(destination.stream.getAudioTracks()[0])`
+  attaches the sender's peer connection to the native conference bus (`ConferenceMixer.attachLeg`)
+  — child legs under their `siperbConferenceLegId`, the host under `pc-<id>` — and
+  `replaceTrack(realTrack)` / `context.close()` / `track.stop()` / the connection closing detach it
+  and restore the sender's real track. Nothing is swapped natively; the bus overwrites the capture
+  below the encoder. Idempotent across the SDK's per-join republish.
 - `registerGlobals()` installs both only when the native recorder / conference bus exist in the
   binary, and never over a host-installed class.
 
@@ -148,8 +154,8 @@ custom video encoder/decoder factories, a custom audio device module (Android) /
 - End-of-candidates signalling (`addIceCandidate(null)` is accepted as a no-op).
 - Insertable streams / encoded transforms, identity assertions, Plan B.
 - `AudioContext` is not Web Audio: no sample processing, no scheduling, no `context.destination`
-  playback. Sending a mix track with `RTCRtpSender.replaceTrack` (the conference path) throws
-  `NotSupportedError` until the conference binding lands; the phone's shim covers that today.
+  playback. Per-source `gain.value` is not applied natively (0 excludes a source, anything else
+  passes through); conference mute goes through `ConferenceMixer.setMicMuted`.
 - A microphone failure is reported as `mute`, never `ended`: the engine retries capture on the next session, so the track stays usable and `unmute` follows when it recovers. "Not sending yet" (no peer connection sending) is deliberately not modelled as muted.
 - macOS and tvOS targets are unmaintained; see the table above.
 

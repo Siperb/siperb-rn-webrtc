@@ -1,11 +1,12 @@
 import { NativeModules } from 'react-native';
 
+import { bindMixedTrackToSender, unbindMixedTrack } from './ConferenceLegBinding';
 import Logger from './Logger';
 import MediaStreamTrack from './MediaStreamTrack';
+import type MixedAudioTrack from './MixedAudioTrack';
 import RTCDTMFSender from './RTCDTMFSender';
 import RTCRtpCapabilities from './RTCRtpCapabilities';
 import RTCRtpSendParameters, { RTCRtpSendParametersInit } from './RTCRtpSendParameters';
-import { makeDOMException } from './RTCUtil';
 
 const log = new Logger('pc');
 const { WebRTCModule } = NativeModules;
@@ -34,12 +35,19 @@ export default class RTCRtpSender {
     }
 
     async replaceTrack(track: MediaStreamTrack | null): Promise<void> {
+        // An AudioContext mix has no native track to hand the sender. "Sending" it means
+        // putting this peer connection on the native conference bus, which then overwrites
+        // the real track's capture with the mix below the encoder (ConferenceLegBinding).
         if (track?._isVirtual) {
-            // An AudioContext mix has no native track to hand the sender. Sending it means
-            // attaching this peer connection to the native conference bus, which lands with
-            // the conference binding; until then refuse loudly rather than swap in nothing.
-            throw makeDOMException('NotSupportedError',
-                'RTCRtpSender.replaceTrack: a mixed audio track cannot be sent yet (conference binding pending)');
+            await bindMixedTrackToSender(track as MixedAudioTrack, this);
+
+            return;
+        }
+
+        if (this._track?._isVirtual) {
+            // Leaving the mix: the leg comes off the bus and `_track` is the real track again,
+            // so the native swap below is a plain replace (or a no-op for the same track).
+            await unbindMixedTrack(this._track as MixedAudioTrack);
         }
 
         try {

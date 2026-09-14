@@ -1,5 +1,6 @@
 import AudioDestinationNode from './AudioDestinationNode';
 import ChannelMergerNode from './ChannelMergerNode';
+import { unbindMixedTrack } from './ConferenceLegBinding';
 import GainNode from './GainNode';
 import Logger from './Logger';
 import type MediaStream from './MediaStream';
@@ -111,8 +112,10 @@ export default class AudioContext extends EventTarget<AudioContextEventMap> {
     }
 
     /**
-     * Idempotent. Everything this context put on the native side is released synchronously
-     * (see the binding in slice 2), so the SDK's fire-and-forget `ctx.close()` is enough.
+     * Idempotent. Every leg this context's mixes put on the native bus comes off in the same
+     * tick (ConferenceLegBinding restores each sender's real track synchronously and issues
+     * the native detach at once), so the SDK's fire-and-forget `ctx.close()` is enough. A
+     * recording in progress is not stopped: the recorder owns its own lifecycle.
      */
     close(): Promise<void> {
         if (this._state === 'closed') {
@@ -120,9 +123,12 @@ export default class AudioContext extends EventTarget<AudioContextEventMap> {
         }
 
         this._state = 'closed';
+
+        const detaches = this._destinations.map(destination => unbindMixedTrack(destination._track));
+
         this.dispatchEvent(new Event('statechange'));
 
-        return Promise.resolve();
+        return Promise.all(detaches).then(() => undefined);
     }
 
     private _transition(state: AudioContextState): Promise<void> {

@@ -1,10 +1,13 @@
 import { NativeModules } from 'react-native';
 
+import { unbindForPeerConnection, unbindMixedTrack } from './ConferenceLegBinding';
 import { addListener, removeListener } from './EventEmitter';
 import Logger from './Logger';
 import MediaStream from './MediaStream';
 import MediaStreamTrack from './MediaStreamTrack';
 import MediaStreamTrackEvent from './MediaStreamTrackEvent';
+import type MixedAudioTrack from './MixedAudioTrack';
+import { registerPeerConnection, unregisterPeerConnection } from './PeerConnectionRegistry';
 import RTCCertificate from './RTCCertificate';
 import RTCDataChannel from './RTCDataChannel';
 import RTCDataChannelEvent from './RTCDataChannelEvent';
@@ -87,6 +90,12 @@ export default class RTCPeerConnection extends EventTarget<RTCPeerConnectionEven
     iceConnectionState: RTCIceConnectionState = 'new';
 
     _pcId: number;
+    /**
+     * The `siperbConferenceLegId` this connection was created with, or null for a connection
+     * on the app's factory. Fixed for life, like the factory it selects; the conference
+     * binding reads it to attach the connection to the bus under the key that factory pulls.
+     */
+    _conferenceLegId: string | null;
     _transceivers: { order: number, transceiver: RTCRtpTransceiver }[];
     _remoteStreams: Map<string, MediaStream>;
     _pendingTrackEvents: any[];
@@ -175,6 +184,9 @@ export default class RTCPeerConnection extends EventTarget<RTCPeerConnectionEven
         if (!WebRTCModule.peerConnectionInit(configuration, this._pcId, conferenceLegId)) {
             throw new Error('Failed to initialize PeerConnection, check the native logs!');
         }
+
+        this._conferenceLegId = conferenceLegId === null ? null : String(conferenceLegId);
+        registerPeerConnection(this);
 
         this._transceivers = [];
         this._remoteStreams = new Map();
@@ -505,8 +517,9 @@ export default class RTCPeerConnection extends EventTarget<RTCPeerConnectionEven
         }
 
         if (track._isVirtual) {
-            // Native has no object for an AudioContext mix; the way to send one is
-            // replaceTrack on a sender that already carries a real audio track.
+            // Native has no object for an AudioContext mix. Sending one means putting this
+            // connection on the conference bus, which replaceTrack does on a sender that
+            // already carries the real audio track the bus will overwrite.
             throw RTCUtil.makeDOMException('NotSupportedError',
                 'RTCPeerConnection.addTrack: a mixed audio track is attached with replaceTrack, not addTrack');
         }
@@ -629,6 +642,11 @@ export default class RTCPeerConnection extends EventTarget<RTCPeerConnectionEven
             return;
         }
 
+        if (existingSender.track._isVirtual) {
+            // The bus leg goes first; native then removes the real track the sender still holds.
+            unbindMixedTrack(existingSender.track as MixedAudioTrack);
+        }
+
         // Blocking!
         WebRTCModule.peerConnectionRemoveTrack(this._pcId, sender.id);
 
@@ -742,7 +760,10 @@ export default class RTCPeerConnection extends EventTarget<RTCPeerConnectionEven
             this.dispatchEvent(new Event('signalingstatechange'));
 
             if (ev.signalingState === 'closed') {
-                // This PeerConnection is done, clean up.
+                // This PeerConnection is done, clean up. Any conference leg it carried comes
+                // off the bus with it — the SDK's own teardown normally did that already.
+                unbindForPeerConnection(this._pcId);
+                unregisterPeerConnection(this._pcId);
                 removeListener(this);
 
                 WebRTCModule.peerConnectionDispose(this._pcId);

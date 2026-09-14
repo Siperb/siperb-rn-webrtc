@@ -397,14 +397,26 @@ static const NSUInteger kMaxFrames = 4096;
         _hostMixer.legId = legId;
     }
 
+    // RE-ATTACH IS A REFRESH, NOT AN ADDITION. The SDK republishes a leg's mix on every join,
+    // so this runs once per participant for the same leg; appending a second tap per remote
+    // track summed that party twice into every mix (double level). Drop the previous taps and
+    // re-tap from the tracks handed in now.
     NSMutableArray<SiperbRemoteTap *> *legTaps;
+    NSArray<SiperbRemoteTap *> *stale = nil;
     os_unfair_lock_lock(&_lock);
     legTaps = _taps[legId];
     if (legTaps == nil) {
         legTaps = [NSMutableArray new];
         _taps[legId] = legTaps;
+    } else {
+        stale = [legTaps copy];
+        [legTaps removeAllObjects];
     }
     os_unfair_lock_unlock(&_lock);
+
+    for (SiperbRemoteTap *tap in stale) {
+        [tap.track removeRenderer:tap];
+    }
 
     for (RTCAudioTrack *track in remoteTracks) {
         if (track == nil) {

@@ -1,5 +1,4 @@
 
-import AudioContext from '../../src/AudioContext';
 import RTCRtpSender from '../../src/RTCRtpSender';
 
 import { fakeTrack } from './helpers';
@@ -41,15 +40,5 @@ describe('RTCRtpSender.replaceTrack', () => {
         await sender.replaceTrack(other);
         expect(native.senderReplaceTrack).toHaveBeenCalledWith(1, 's1', 'mic2');
         expect(sender.track).toBe(other);
-    });
-
-    test('refuses a virtual mix track until the conference binding exists', async () => {
-        const mic = fakeTrack('mic', 'audio', false);
-        const sender = new RTCRtpSender({ peerConnectionId: 1, id: 's1', track: mic, rtpParameters: RTP_PARAMS });
-        const mix = new AudioContext().createMediaStreamDestination().stream.getAudioTracks()[0];
-
-        await expect(sender.replaceTrack(mix)).rejects.toMatchObject({ name: 'NotSupportedError' });
-        expect(native.senderReplaceTrack).not.toHaveBeenCalled();
-        expect(sender.track).toBe(mic);
     });
 });

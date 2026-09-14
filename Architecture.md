@@ -117,9 +117,16 @@ W3C-shaped classes; the phone keeps a thin shim carrying only its own convention
   native default paths (`CallRecorder.recordingsDirectory`). The phone's shim is a
   subclass overriding both to route through its `RecordingManager` by `Data.SessionId`
   — ids, paths, rows, CDR and crash salvage stay in the host.
-- **Conference legs** (`replaceTrack(mixTrack)` → `ConferenceMixer.attachLeg`) are the
-  next slice; until it lands, `replaceTrack` refuses a virtual track with
-  `NotSupportedError` and the phone's `AudioContext` shim keeps doing that job.
+- **Conference legs** ([`ConferenceLegBinding.ts`](src/ConferenceLegBinding.ts)):
+  `sender.replaceTrack(mixTrack)` puts the sender's peer connection on the native bus
+  instead of swapping anything natively — a child leg under the `siperbConferenceLegId`
+  its connection was born with (the synthetic factory's mixer pulls the bus by that key),
+  the host under `pc-<id>`. `sender.track` becomes the mix and the real track is
+  remembered; `replaceTrack(realTrack)`, `context.close()`, `mixTrack.stop()` or the
+  connection closing detach the leg and restore it — synchronously, because the SDK
+  fires `close()` and forgets. Idempotent per (track, sender) and serialised, since the
+  SDK republishes on every join and native `attachLeg` re-taps. The live connections are
+  found through [`PeerConnectionRegistry.ts`](src/PeerConnectionRegistry.ts).
 
 | Web API the SDK expects | This library | Native work |
 |---|---|---|
