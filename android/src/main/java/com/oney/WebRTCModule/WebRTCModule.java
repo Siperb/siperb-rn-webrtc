@@ -167,13 +167,32 @@ public class WebRTCModule extends ReactContextBaseJavaModule {
      * bundle can reach an app binary older than this file, where the key is simply absent and
      * reads as false. Version skew is then handled by construction rather than by a check
      * someone has to remember to write.
+     *
+     * `displayMediaSupported` is what mediaDevices.supportsDisplayMedia answers from: whether
+     * getDisplayMedia() on THIS build can deliver a frame. MediaProjection itself is always
+     * present (minSdk 24); what varies is the foreground service Android 10+ demands before it
+     * hands over the screen - the option that starts it, and on API 34+ the permission it needs.
+     * Read here, at bridge start, which is after Application.onCreate where an app would turn
+     * the option off. False is the host's cue to withhold getDisplayMedia, so shared code that
+     * feature-detects it reads "not supported" rather than crashing on consent.
      */
     @Nullable
     @Override
     public Map<String, Object> getConstants() {
         Map<String, Object> constants = new HashMap<>();
         constants.put("callRecordingSupportsVideo", true);
+        constants.put("displayMediaSupported", isDisplayMediaSupported());
         return constants;
+    }
+
+    private boolean isDisplayMediaSupported() {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q) {
+            return true;
+        }
+        if (!WebRTCModuleOptions.getInstance().enableMediaProjectionService) {
+            return false;
+        }
+        return MediaProjectionService.hasRequiredPermissions(getReactApplicationContext());
     }
 
     private PeerConnection getPeerConnection(int id) {

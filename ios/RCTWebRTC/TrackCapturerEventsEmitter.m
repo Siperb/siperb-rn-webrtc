@@ -23,6 +23,22 @@ NS_ASSUME_NONNULL_BEGIN
     return self;
 }
 
+/**
+ * A LOCAL-track mute change: no `pcId`, on purpose. RTCPeerConnection's listener for this
+ * event filters on `ev.pcId !== this._pcId` and so ignores it; MediaStreamTrack's local
+ * listener matches on trackId alone. The screen track is created `muted` (see getDisplayMedia
+ * in WebRTCModule+RTCMediaStream.m) and this is what un-mutes it.
+ */
+- (void)capturerDidStart:(RTCVideoCapturer *)capturer {
+    [self.module sendEventWithName:kEventMediaStreamTrackMuteChanged
+                              body:@{
+                                  @"trackId" : self.trackId,
+                                  @"muted" : @NO,
+                              }];
+
+    RCTLog(@"[TrackCapturerEventsEmitter] started (unmute) event for track %@", self.trackId);
+}
+
 - (void)capturerDidEnd:(RTCVideoCapturer *)capturer {
     [self.module sendEventWithName:kEventMediaStreamTrackEnded
                               body:@{

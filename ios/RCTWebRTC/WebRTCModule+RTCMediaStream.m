@@ -188,10 +188,17 @@ RCT_EXPORT_METHOD(getDisplayMedia : (NSDictionary *)constraints resolver : (RCTP
     NSString *trackId = videoTrack.trackId;
     self.localTracks[trackId] = videoTrack;
 
+    // BORN MUTED. The track exists now, but no frame can arrive until the user starts the
+    // Broadcast Upload Extension from the picker and it connects to our socket — and the picker
+    // has no cancel callback, so this is the only honest state to hand back. MDN's `muted` means
+    // exactly "temporarily unable to provide data"; ScreenCapturer un-mutes it on connection
+    // (capturerDidStart) and JS can await `unmute` — or `ended`, or a timeout — to tell consent
+    // from dismissal.
     NSDictionary *trackInfo = @{
         @"enabled" : @(videoTrack.isEnabled),
         @"id" : videoTrack.trackId,
         @"kind" : videoTrack.kind,
+        @"muted" : @YES,
         @"readyState" : @"live",
         @"remote" : @(NO)
     };

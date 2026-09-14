@@ -21,6 +21,12 @@ export type MediaStreamTrackInfo = {
     settings: object;
     peerConnectionId: number;
     readyState: MediaStreamTrackState;
+    /**
+     * Born unable to deliver. Only the iOS screen track sets this: it exists from
+     * getDisplayMedia() onwards but carries nothing until the user starts the Broadcast Upload
+     * Extension and it connects, which is when native un-mutes it. Absent means false.
+     */
+    muted?: boolean;
 }
 
 export type MediaTrackSettings = {
@@ -57,7 +63,7 @@ export default class MediaStreamTrack extends EventTarget<MediaStreamTrackEventM
         this._constraints = info.constraints || {};
         this._enabled = info.enabled;
         this._settings = info.settings || {};
-        this._muted = false;
+        this._muted = info.muted === true;
         this._peerConnectionId = info.peerConnectionId;
         this._readyState = info.readyState;
 
@@ -247,6 +253,28 @@ export default class MediaStreamTrack extends EventTarget<MediaStreamTrackEventM
             this._readyState = 'ended';
 
             this.dispatchEvent(new Event('ended'));
+        });
+
+        // LOCAL mute changes carry no pcId - that is how they are told apart from the remote
+        // ones RTCPeerConnection routes to _setMutedInternal. Today the only sender is the iOS
+        // screen capturer announcing that the broadcast extension has connected (`unmute`),
+        // which is the signal a caller awaits to tell "user started sharing" from "user
+        // dismissed the picker".
+        addListener(this, 'mediaStreamTrackMuteChanged', (ev: any) => {
+            if ((ev.pcId !== undefined && ev.pcId !== null) || ev.trackId !== this.id || this._readyState === 'ended') {
+                return;
+            }
+
+            const muted = ev.muted === true;
+
+            if (muted === this._muted) {
+                return;
+            }
+
+            log.debug(`${this.id} mediaStreamTrackMuteChanged (local) muted=${muted}`);
+            this._muted = muted;
+
+            this.dispatchEvent(new Event(muted ? 'mute' : 'unmute'));
         });
     }
 

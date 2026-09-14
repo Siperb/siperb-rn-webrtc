@@ -2,6 +2,14 @@
           package="com.oney.WebRTCModule"
           xmlns:tools="http://schemas.android.com/tools"
     >
+    <!-- What MediaProjectionService below needs to START. Declared here, not left to the app:
+         <uses-permission> in a library manifest merges into every consumer, and the failure
+         when an app forgets is not a rejected promise but a SecurityException inside
+         onStartCommand on Android 14+ - an app crash the moment the user consents to share.
+         FOREGROUND_SERVICE_MEDIA_PROJECTION is unknown below API 34 and ignored there. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+
     <application>
         <service
                 android:name=".MediaProjectionService"

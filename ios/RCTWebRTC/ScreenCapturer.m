@@ -134,6 +134,10 @@ const NSUInteger kMaxReadLength = 10 * 1024;
     mach_timebase_info_data_t _timebaseInfo;
     NSInteger _readLength;
     int64_t _startTimeStampNs;
+    // The accepted socket comes as an input AND an output stream, and both report
+    // NSStreamEventOpenCompleted through this one delegate — so "the extension connected"
+    // is announced once, not twice.
+    BOOL _didReportStart;
 }
 
 - (instancetype)initWithDelegate:(__weak id<RTCVideoCapturerDelegate>)delegate {
@@ -154,6 +158,7 @@ const NSUInteger kMaxReadLength = 10 * 1024;
 
 - (void)startCaptureWithConnection:(SocketConnection *)connection {
     _startTimeStampNs = -1;
+    _didReportStart = NO;
 
     self.connection = connection;
     self.message = nil;
@@ -241,6 +246,15 @@ const NSUInteger kMaxReadLength = 10 * 1024;
     switch (eventCode) {
         case NSStreamEventOpenCompleted:
             NSLog(@"server stream open completed");
+            // The Broadcast Upload Extension has connected: frames can flow from here on. This is
+            // the moment the JS track stops being `muted`, and the only signal the app has that
+            // the user actually tapped "Start Broadcast" rather than dismissing the picker.
+            if (!_didReportStart) {
+                _didReportStart = YES;
+                if ([self.eventsDelegate respondsToSelector:@selector(capturerDidStart:)]) {
+                    [self.eventsDelegate capturerDidStart:self];
+                }
+            }
             break;
         case NSStreamEventHasBytesAvailable:
             [self readBytesFromStream:(NSInputStream *)aStream];

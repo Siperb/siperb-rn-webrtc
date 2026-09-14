@@ -63,6 +63,8 @@ Notable files:
 | [`RTCDataChannel.ts`](src/RTCDataChannel.ts) | Data channels |
 | [`RTCView.ts`](src/RTCView.ts) / [`RTCPIPView.tsx`](src/RTCPIPView.tsx) | Native video view + iOS PiP view |
 | [`RTCAudioSession.ts`](src/RTCAudioSession.ts) | iOS audio-session control (manual audio mode) |
+| [`ConferenceMixer.ts`](src/ConferenceMixer.ts) | Native conference audio bus — control only, audio never crosses the bridge (`WebRTCModule+Conference`, `SiperbConferenceMixManager`) |
+| [`CallRecorder.ts`](src/CallRecorder.ts) | Native call recorder — taps mic + remote sinks below the encoder, writes channel-split PCM/AAC; with `video` composites the named tracks natively (`CallVideoRecorder`) |
 | [`EventEmitter.ts`](src/EventEmitter.ts) | Subscribes once to each native event, re-emits on a JS-only emitter |
 | [`Logger.ts`](src/Logger.ts) | Wraps the `debug` package; root prefix `rn-webrtc` |
 | [`src/vendor/event-target-shim`](src/vendor) | Bundled `EventTarget` implementation |
@@ -79,6 +81,44 @@ Notable files:
   authoritative list in `NATIVE_EVENTS`, listens via `NativeEventEmitter`, and
   re-broadcasts on an internal `EventEmitter` that the JS objects subscribe to.
   Adding a new native event requires registering it in `NATIVE_EVENTS`.
+
+## Host shims — what the phone's web-API shims map onto
+
+`react-native-siperb-phone` runs the shared browser SDK (`browser-phone-sdk.min.js`)
+directly in Hermes. Where that SDK gates a feature on a web-platform constructor, the
+phone installs an MDN-shaped shim (`src/providers/windowShims/`) that translates the web
+API into calls on this library. **The shim is bookkeeping; the heavy lifting is here.**
+
+| Web API the SDK expects | Shim (react-native-siperb-phone) | Native work (this library) |
+|---|---|---|
+| `new AudioContext()` — `createMediaStreamSource`, `createMediaStreamDestination`, `createGain`, `createChannelMerger` | `windowShims/AudioContext.ts` — nodes are inert objects; a source built from a leg's own sender stream identifies the leg and calls `attachLeg` | `ConferenceMixer` → `WebRTCModule+Conference` / `SiperbConferenceMixManager` (iOS), the conference audio bus (Android). Mixes below the encoder; the mix is written into the leg's capture buffer, so no track is swapped and no SDP moves |
+| `new MediaRecorder(stream)` — `start()`, `stop()`, `ondataavailable` | `windowShims/MediaRecorder.ts` — ignores the stream, routes start/stop by session id, hands back a Blob-shaped *reference* (path, size, type) at stop | `CallRecorder` → `CallAudioRecorder` + `CallVideoRecorder`. Taps mic and remote sinks natively, writes the crash-safe WAV, encodes, and composites video from the named tracks with the SDK's own layout vocabulary (`them-pnp`, `side-by-side`, …) |
+| `document` | `documentShims/document.ts` — two no-op listener methods, **no `createElement`** | none |
+
+Two rules keep this honest, and both are enforced by the phone, not here:
+
+- **Publish-or-don't.** Each shim is installed only if the native method it reaches
+  exists (`WebRTCModule.conferenceAttachLeg`, `WebRTCModule.startCallRecording`). A truthy
+  name under `AudioContext` or `MediaRecorder` switches the SDK's whole feature on, so a
+  shim that cannot do the work reports success and does nothing — worse than absence.
+- **Probe the native module, not the JS wrapper.** `ConferenceMixer` and `CallRecorder`
+  are static classes that exist on every host; only the bridged method's presence says
+  whether the binary can do it. Adding a native capability means adding the bridged
+  method — the shim gates on that and needs no change for a new platform.
+
+### Not yet: `document.createElement("canvas")`
+
+The SDK probes `typeof document.createElement === "function"` to mean "real DOM" and,
+on a video call, uses it to run its own canvas compositor (`PhoneCore/RecordingManager.js`
+`StartVideoComposite`: a `<canvas>` draw loop, `<video>` decode, `captureStream()`). On
+this host that picture is already produced natively by `CallVideoRecorder`, so a canvas
+shim today would run a second, fake compositor beside the real one. Before the phone can
+install one, this library needs a **canvas-backed video source**: an `HTMLCanvasElement`-
+shaped object whose `getContext("2d")` drawing lands in native and whose `captureStream()`
+returns a real `MediaStreamTrack` — the same shape as a camera track, so it can be
+`replaceTrack`ed onto a sender. That is what would also unlock the SDK's picture /
+whiteboard presentation modes, which the web UI builds on a canvas. Until it exists, the
+`document` shim deliberately has no `createElement`.
 
 ## Native module name
 

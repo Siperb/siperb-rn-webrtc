@@ -15,6 +15,7 @@ NSString *const kRTCAppGroupIdentifier = @"RTCAppGroupIdentifier";
 
 @interface ScreenCaptureController (CapturerEventsDelegate)<CapturerEventsDelegate>
 - (void)capturerDidEnd:(RTCVideoCapturer *)capturer;
+- (void)capturerDidStart:(RTCVideoCapturer *)capturer;
 @end
 
 @interface ScreenCaptureController (Private)
@@ -61,6 +62,12 @@ NSString *const kRTCAppGroupIdentifier = @"RTCAppGroupIdentifier";
 
 - (void)capturerDidEnd:(RTCVideoCapturer *)capturer {
     [self.eventsDelegate capturerDidEnd:capturer];
+}
+
+- (void)capturerDidStart:(RTCVideoCapturer *)capturer {
+    if ([self.eventsDelegate respondsToSelector:@selector(capturerDidStart:)]) {
+        [self.eventsDelegate capturerDidStart:capturer];
+    }
 }
 
 // MARK: Private Methods

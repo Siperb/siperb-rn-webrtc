@@ -5,6 +5,7 @@ import android.app.Service;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
 import android.os.Build;
 import android.os.IBinder;
@@ -24,6 +25,12 @@ public class MediaProjectionService extends Service {
     private static final String TAG = MediaProjectionService.class.getSimpleName();
 
     static final int NOTIFICATION_ID = new Random().nextInt(99999) + 10000;
+
+    /**
+     * API 34's name for the permission, spelled out so this compiles against any compileSdk
+     * the consuming app pins. Unknown to older platforms, where the check is skipped.
+     */
+    private static final String PERMISSION_MEDIA_PROJECTION = "android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION";
 
     private static volatile CompletableFuture<Void> startFuture;
 
@@ -67,6 +74,21 @@ public class MediaProjectionService extends Service {
         return future;
     }
 
+    /** Whether this build declares what the service needs; false is a guaranteed failure to start. */
+    public static boolean hasRequiredPermissions(Context context) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
+            return true;
+        }
+        if (context.checkSelfPermission(android.Manifest.permission.FOREGROUND_SERVICE) != PackageManager.PERMISSION_GRANTED) {
+            return false;
+        }
+        if (Build.VERSION.SDK_INT >= 34
+                && context.checkSelfPermission(PERMISSION_MEDIA_PROJECTION) != PackageManager.PERMISSION_GRANTED) {
+            return false;
+        }
+        return true;
+    }
+
     public static void abort(Context context) {
         if (!WebRTCModuleOptions.getInstance().enableMediaProjectionService) {
             return;
@@ -83,6 +105,27 @@ public class MediaProjectionService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        // Checked BEFORE startForeground rather than caught after: on API 34+ a missing
+        // FOREGROUND_SERVICE_MEDIA_PROJECTION is a SecurityException thrown out of
+        // startForeground, and an exception out of onStartCommand takes the whole process down.
+        // The library manifest declares the permission, so this only fires when an app has
+        // stripped it - and then it is a logged refusal, not a crash. Failing the start future
+        // is what makes getDisplayMedia() reject instead of building a capturer that cannot work.
+        if (!hasRequiredPermissions(this)) {
+            Log.e(TAG, "Missing FOREGROUND_SERVICE / FOREGROUND_SERVICE_MEDIA_PROJECTION permission; "
+                    + "screen capture cannot start on this build");
+
+            CompletableFuture<Void> fut = startFuture;
+
+            if (fut != null) {
+                startFuture = null;
+                fut.completeExceptionally(new SecurityException("Missing media projection foreground service permission"));
+            }
+
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+
         Notification notification = MediaProjectionNotification.buildMediaProjectionNotification(this);
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {

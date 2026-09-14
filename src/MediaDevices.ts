@@ -11,6 +11,23 @@ type MediaDevicesEventMap = {
 }
 
 class MediaDevices extends EventTarget<MediaDevicesEventMap> {
+    /**
+     * Whether {@link getDisplayMedia} on THIS build can deliver a frame.
+     *
+     * Not a W3C member - a host fact, like CallRecorder.supportsVideo, and answered the same
+     * way: a native constant, synchronous, that cannot lie about the binary it came from.
+     * getDisplayMedia() itself always constructs a track, so its presence proves nothing; what
+     * decides it is packaging the JS cannot see - on iOS a bundled Broadcast Upload Extension,
+     * an App Group and two Info.plist keys; on Android the foreground service Android 10+
+     * demands and, on 14+, its permission. `undefined` on a binary predating this reads as
+     * false. A host that gates a feature on `typeof mediaDevices.getDisplayMedia` should delete
+     * the method where this is false, so the probe reads "not supported" rather than presenting
+     * a black screen.
+     */
+    get supportsDisplayMedia(): boolean {
+        return WebRTCModule?.displayMediaSupported === true;
+    }
+
     get ondevicechange() {
         return getEventAttributeValue(this, 'devicechange');
     }

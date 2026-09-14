@@ -31,10 +31,76 @@
  * reads as false. Version skew is then handled by construction rather than by a check someone
  * has to remember to write.
  *
+ * `displayMediaSupported` is what mediaDevices.supportsDisplayMedia answers from: whether
+ * getDisplayMedia() on THIS build can ever deliver a frame. The screen capturer itself always
+ * constructs — it opens a socket and waits — so the track alone proves nothing; what decides it
+ * is app packaging the JS cannot see (below). False here is the host's cue to withhold
+ * getDisplayMedia altogether, so shared code that feature-detects it reads "not supported"
+ * instead of presenting a black screen.
+ *
  * Nothing here may touch UIKit — requiresMainQueueSetup is NO above.
  */
 - (NSDictionary *)constantsToExport {
-    return @{@"callRecordingSupportsVideo" : @YES};
+    return @{
+        @"callRecordingSupportsVideo" : @YES,
+        @"displayMediaSupported" : @([self isDisplayMediaSupported]),
+    };
+}
+
+/**
+ * Everything iOS screen capture needs from the app bundle, checked the way the capture path
+ * will use it. Each is a silent failure at capture time and a clear NO here:
+ *
+ *   - not the Simulator / macOS / tvOS — createScreenCaptureVideoTrack returns nil there;
+ *   - `RTCAppGroupIdentifier` in Info.plist — ScreenCaptureController reads the socket path
+ *     off it, and without it startCapture returns before listening;
+ *   - the App Group ENTITLEMENT, not just the key — containerURLForSecurityApplicationGroup
+ *     Identifier: is nil when the app is not entitled, and the socket then has no home;
+ *   - `RTCScreenSharingExtension` in Info.plist — the picker's preferredExtension; and
+ *   - that extension actually BUNDLED under PlugIns/ as a broadcast-upload appex. The key
+ *     alone is a promise; the .appex is the proof.
+ *
+ * The two Info.plist keys are react-native-webrtc's names (kRTCAppGroupIdentifier in
+ * ScreenCaptureController.m, kRTCScreenSharingExtension in ScreenCapturePickerViewManager.m)
+ * and must stay in step with them.
+ */
+- (BOOL)isDisplayMediaSupported {
+#if TARGET_IPHONE_SIMULATOR || TARGET_OS_OSX || TARGET_OS_TV
+    return NO;
+#else
+    NSBundle *mainBundle = [NSBundle mainBundle];
+    NSDictionary *info = mainBundle.infoDictionary;
+    NSString *appGroup = info[@"RTCAppGroupIdentifier"];
+    NSString *extensionId = info[@"RTCScreenSharingExtension"];
+    if (![appGroup isKindOfClass:[NSString class]] || appGroup.length == 0) {
+        return NO;
+    }
+    if (![extensionId isKindOfClass:[NSString class]] || extensionId.length == 0) {
+        return NO;
+    }
+    if ([[NSFileManager defaultManager] containerURLForSecurityApplicationGroupIdentifier:appGroup] == nil) {
+        return NO;
+    }
+
+    NSString *plugInsPath = mainBundle.builtInPlugInsPath;
+    if (plugInsPath == nil) {
+        return NO;
+    }
+    NSArray<NSString *> *plugIns = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:plugInsPath error:nil];
+    for (NSString *name in plugIns) {
+        if (![name.pathExtension isEqualToString:@"appex"]) {
+            continue;
+        }
+        NSBundle *appex = [NSBundle bundleWithPath:[plugInsPath stringByAppendingPathComponent:name]];
+        if (![appex.bundleIdentifier isEqualToString:extensionId]) {
+            continue;
+        }
+        NSDictionary *extension = appex.infoDictionary[@"NSExtension"];
+        NSString *point = [extension isKindOfClass:[NSDictionary class]] ? extension[@"NSExtensionPointIdentifier"] : nil;
+        return [point isEqualToString:@"com.apple.broadcast-services-upload"];
+    }
+    return NO;
+#endif
 }
 
 - (void)dealloc {
