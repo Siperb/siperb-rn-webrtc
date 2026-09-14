@@ -64,11 +64,26 @@ The per-poll `getStats` debug line was removed in this fork for this reason.
 
 ## Fork specifics
 
+- **Forked from upstream `master` on 22 June 2026** (the `init` commit
+  `0aa5e92`), as a snapshot with no shared git history. The base was upstream
+  commit `e5d8781` (124.0.7 plus the unreleased `master` work that later shipped
+  as 124.0.8); `package.json` kept the `124.0.7` version `master` carried.
+- **Upstream is resynced by patch, not by merge.** There is no upstream remote
+  and no shared history — a grafted merge would pull upstream's ~420 MB of
+  history into a repo consumers install straight from Git. Current resync base:
+  **upstream `master` @ `7266a9b` (9 Sep 2026)**, applied 14 Sep 2026. Next round:
+
+  ```bash
+  git fetch --no-tags https://github.com/react-native-webrtc/react-native-webrtc.git master
+  git diff 7266a9b FETCH_HEAD -- . ':!examples' ':!package-lock.json' ':!package.json' | git apply --3way --index
+  ```
+
+  `--no-tags` matters (a plain fetch drags ~120 upstream tags into the repo).
+  `package.json` is merged by hand because name/version differ. Then update the
+  base SHA here and in [Architecture.md](Architecture.md).
 - Package name: `siperb-rn-webrtc`; URLs point at
   `github.com/Siperb/siperb-rn-webrtc`. The podspec filename matches, and the
   iOS pod name derives from `package.json`'s `name`.
-- **No upstream sync is planned** — maintain changes directly here; don't add
-  machinery to track upstream.
 - Leave intentionally unchanged: the native module name (`WebRTCModule`), the
   Android Java package (`com.oney.WebRTCModule`), and links to external upstream
   resources (Jitsi, the react-native-webrtc web-shim, Discourse).

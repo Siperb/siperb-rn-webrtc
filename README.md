@@ -2,7 +2,8 @@
 
 # Siperb-RN-WebRTC
 
-> Siperb's maintained fork of [react-native-webrtc](https://github.com/react-native-webrtc/react-native-webrtc).
+> Siperb's maintained fork of [react-native-webrtc](https://github.com/react-native-webrtc/react-native-webrtc),
+> forked from upstream `master` in June 2026 (between the 124.0.7 and 124.0.8 releases).
 
 [![npm version](https://img.shields.io/npm/v/siperb-rn-webrtc)](https://www.npmjs.com/package/siperb-rn-webrtc)
 [![npm downloads](https://img.shields.io/npm/dm/siperb-rn-webrtc)](https://www.npmjs.com/package/siperb-rn-webrtc)

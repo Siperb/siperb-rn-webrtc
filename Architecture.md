@@ -146,9 +146,14 @@ per-poll `getStats` debug line was removed in this fork for that reason.
 
 ## Fork notes (Siperb)
 
+- Forked from upstream `master` on 22 June 2026 (the `init` commit `0aa5e92`),
+  as a snapshot with no shared git history. The base is upstream 124.0.7 plus
+  the unreleased `master` work that later shipped as 124.0.8 (July 2026).
 - npm package renamed to `siperb-rn-webrtc`; repository/homepage/issue URLs point
   at `github.com/Siperb/siperb-rn-webrtc`. The podspec was renamed to match.
-- No upstream sync is planned — changes are maintained directly here.
+- Upstream is resynced by patch (no remote, no shared history). Current base:
+  upstream `master` @ `7266a9b` (9 Sep 2026). The procedure is in
+  [CLAUDE.md](CLAUDE.md) under "Fork specifics".
 - The native module name (`WebRTCModule`), the Android Java package
   (`com.oney.WebRTCModule`), and links to genuinely-external upstream resources
   (Jitsi, the web-shim, Discourse) are intentionally left unchanged.
