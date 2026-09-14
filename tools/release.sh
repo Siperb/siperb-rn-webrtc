@@ -40,6 +40,6 @@ git tag -a "$version" -m "$($git_log_cmd)"
 echo
 echo -e "===== Version $version released! ====="
 echo
-echo -e "USE: \"git push origin master --tags\" to push to master"
-echo -e "USE: \"git reset --hard origin/master && git tag -d $version\" to rollback release"
+echo -e "USE: \"git push origin main --tags\" to push to main"
+echo -e "USE: \"git reset --hard origin/main && git tag -d $version\" to rollback release"
 echo

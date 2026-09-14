@@ -4,12 +4,14 @@
 [react-native-webrtc](https://github.com/react-native-webrtc/react-native-webrtc).
 It exposes the W3C WebRTC and `getUserMedia`/`getDisplayMedia` APIs to React
 Native apps by bridging a JavaScript/TypeScript API layer to native WebRTC
-implementations on Android, iOS, and macOS.
+implementations on Android and iOS.
 
-The underlying WebRTC binary is **Jitsi's prebuilt WebRTC 124** (`org.jitsi:webrtc`
-on Android, the `JitsiWebRTC` CocoaPod on Apple platforms). This library does not
-compile WebRTC itself — it wraps that binary and marshals calls across the React
-Native bridge.
+The underlying WebRTC binary is **LiveKit's prebuilt `webrtc-sdk` 125.6422.07**
+(`io.github.webrtc-sdk:android` on Android, the `WebRTC-SDK` CocoaPod on Apple
+platforms). This library does not compile WebRTC itself — it wraps that binary and
+marshals calls across the React Native bridge. The fork moved from Jitsi's WebRTC 124
+build to webrtc-sdk in July 2026 for the audio hooks the call recorder and the
+conference mixer need (`RTCDefaultAudioProcessingModule` and the ADM sample callbacks).
 
 ## Layers
 
@@ -32,7 +34,7 @@ Native bridge.
 │  android/src/main/java/   │  ios/RCTWebRTC/ (+ macos/)        │
 │   com/oney/WebRTCModule/   │   WebRTCModule + categories       │
 ├──────────────────────────┴──────────────────────────────────┤
-│  Jitsi prebuilt WebRTC 124  (org.jitsi:webrtc / JitsiWebRTC)  │
+│  LiveKit webrtc-sdk 125  (io.github.webrtc-sdk / WebRTC-SDK) │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -65,6 +67,10 @@ Notable files:
 | [`RTCAudioSession.ts`](src/RTCAudioSession.ts) | iOS audio-session control (manual audio mode) |
 | [`ConferenceMixer.ts`](src/ConferenceMixer.ts) | Native conference audio bus — control only, audio never crosses the bridge (`WebRTCModule+Conference`, `SiperbConferenceMixManager`) |
 | [`CallRecorder.ts`](src/CallRecorder.ts) | Native call recorder — taps mic + remote sinks below the encoder, writes channel-split PCM/AAC; with `video` composites the named tracks natively (`CallVideoRecorder`) |
+| [`AudioContext.ts`](src/AudioContext.ts) + `AudioNode`/`GainNode`/`ChannelMergerNode`/`MediaStreamAudio*Node`, [`MixedAudioTrack.ts`](src/MixedAudioTrack.ts), [`MixRecipe.ts`](src/MixRecipe.ts) | W3C-shaped Web Audio subset as a declarative graph; a destination's virtual track is what consumers compile |
+| [`MediaRecorder.ts`](src/MediaRecorder.ts), [`RecordingRequest.ts`](src/RecordingRequest.ts), [`RecordingBlob.ts`](src/RecordingBlob.ts) | W3C MediaRecorder over `CallRecorder`; host seam `startNative`/`stopNative` |
+| [`ConferenceLegBinding.ts`](src/ConferenceLegBinding.ts), [`PeerConnectionRegistry.ts`](src/PeerConnectionRegistry.ts) | `replaceTrack(mixTrack)` → `ConferenceMixer.attachLeg`, detach on close/stop/closed |
+| [`MicCaptureStateEmitter.java`](android/src/main/java/com/oney/WebRTCModule/MicCaptureStateEmitter.java) / [`WebRTCModule+RTCAudioSession.m`](ios/RCTWebRTC/WebRTCModule+RTCAudioSession.m) | Microphone failure → local audio track `mute`/`unmute` (native) |
 | [`EventEmitter.ts`](src/EventEmitter.ts) | Subscribes once to each native event, re-emits on a JS-only emitter |
 | [`Logger.ts`](src/Logger.ts) | Wraps the `debug` package; root prefix `rn-webrtc` |
 | [`src/vendor/event-target-shim`](src/vendor) | Bundled `EventTarget` implementation |
@@ -172,7 +178,7 @@ This is the React Native module name and is independent of the npm package name
 ## Android (`android/`)
 
 - Language: Java. Package/namespace: `com.oney.WebRTCModule`.
-- WebRTC binary: `api 'org.jitsi:webrtc:124.+'` (see
+- WebRTC binary: `api 'io.github.webrtc-sdk:android:125.6422.07'` (see
   [`android/build.gradle`](android/build.gradle)).
 - `minSdkVersion` 24, `compileSdkVersion` 24 (overridable via ext properties).
 - [`WebRTCModule.java`](android/src/main/java/com/oney/WebRTCModule/WebRTCModule.java)
@@ -188,7 +194,7 @@ This is the React Native module name and is independent of the npm package name
 
 - Language: Objective-C. iOS sources live in [`ios/RCTWebRTC/`](ios/RCTWebRTC);
   macOS reuses them via [`macos/RCTWebRTC.xcodeproj`](macos).
-- WebRTC binary: the `JitsiWebRTC` pod (`~> 124.0.0`), declared in
+- WebRTC binary: the `WebRTC-SDK` pod (`125.6422.07`), declared in
   [`siperb-rn-webrtc.podspec`](siperb-rn-webrtc.podspec). `apple/` holds a
   placeholder for the WebRTC xcframework artifact.
 - [`WebRTCModule.m`](ios/RCTWebRTC/WebRTCModule.m) is split into Objective-C
@@ -237,4 +243,5 @@ per-poll `getStats` debug line was removed in this fork for that reason.
   [CLAUDE.md](CLAUDE.md) under "Fork specifics".
 - The native module name (`WebRTCModule`), the Android Java package
   (`com.oney.WebRTCModule`), and links to genuinely-external upstream resources
-  (Jitsi, the web-shim, Discourse) are intentionally left unchanged.
+  (the web-shim, Discourse, the jitsi-meet issue links in the Android guide) are
+  intentionally left unchanged.

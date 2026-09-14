@@ -7,7 +7,7 @@ for the full system map; this file covers what you need to make changes safely.
 
 `siperb-rn-webrtc` is Siperb's maintained fork of `react-native-webrtc` — a
 React Native library exposing the W3C WebRTC API by bridging a TypeScript layer
-to native WebRTC (Jitsi prebuilt WebRTC 124) on Android, iOS, and macOS. It is a
+to native WebRTC (LiveKit's prebuilt `webrtc-sdk` 125) on Android and iOS. It is a
 **library**, not an app; the `examples/` apps are for manual testing.
 
 ## Layout
@@ -90,14 +90,20 @@ The per-poll `getStats` debug line was removed in this fork for this reason.
   iOS pod name derives from `package.json`'s `name`.
 - Leave intentionally unchanged: the native module name (`WebRTCModule`), the
   Android Java package (`com.oney.WebRTCModule`), and links to external upstream
-  resources (Jitsi, the react-native-webrtc web-shim, Discourse).
+  resources (the react-native-webrtc web-shim, Discourse, the jitsi-meet issue
+  links in the Android guide).
 - The primary consumer is the **Siperb-Mobile** app, which depends on this fork
   via `github:Siperb/siperb-rn-webrtc`. After landing a change here, that app
   must re-install (and run `pod install` for iOS) to pick it up.
 
 ## Versioning
 
-Tracks upstream WebRTC `124.x` (current `version` in `package.json` is
-`124.0.7`). The native binaries are pinned to 124 (`org.jitsi:webrtc:124.+` /
-`JitsiWebRTC ~> 124.0.0`); keep the JS `version`, the Android dep, and the pod
-dep aligned to the same WebRTC major when bumping.
+`package.json` `version` is **`125.0.0`**: the major is the WebRTC release the native
+binaries are pinned to, the rest is this fork's own. The binaries are LiveKit's
+`webrtc-sdk` **125.6422.07** on both platforms — `io.github.webrtc-sdk:android:125.6422.07`
+in [`android/build.gradle`](android/build.gradle) and `WebRTC-SDK 125.6422.07` in the
+podspec — and the podspec (plus `BroadcastExtension/`'s) reads its version from
+`package.json`. Keep the JS major, the Android dep and the pod dep on the same WebRTC
+major when bumping. The package is not published to npm; consumers pin a Git commit
+(see the README), so the version is informational and shows up in the pod name and
+`FEATURES.md`, not in dependency resolution.

@@ -40,12 +40,13 @@ Software encode/decode factories have been enabled by default.
 
 ## WebRTC Revision
 
-* Currently used revision: [M124](https://github.com/jitsi/webrtc/tree/M124)
-* Supported architectures
+* Binary: [LiveKit `webrtc-sdk`](https://github.com/webrtc-sdk/webrtc) **125.6422.07** (WebRTC M125) —
+  `io.github.webrtc-sdk:android` on Android, the `WebRTC-SDK` CocoaPod on Apple platforms.
+  This package does not compile WebRTC; see [FEATURES.md](FEATURES.md) for what it exposes.
+* Architectures shipped in that binary
   * Android: armeabi-v7a, arm64-v8a, x86, x86_64
-  * iOS: arm64, x86_64
-  * tvOS: arm64
-  * macOS: arm64, x86_64
+  * iOS: arm64 (device), arm64 + x86_64 (simulator), Mac Catalyst
+  * Also in the xcframework, untested by this fork: macOS, tvOS, visionOS
 
 ## Getting Started
 
