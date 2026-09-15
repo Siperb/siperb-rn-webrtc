@@ -190,6 +190,11 @@ public class WebRTCModule extends ReactContextBaseJavaModule {
         Map<String, Object> constants = new HashMap<>();
         constants.put("callRecordingSupportsVideo", true);
         constants.put("displayMediaSupported", isDisplayMediaSupported());
+        // The in-process view/image frame source (whiteboard, picture): no MediaProjection, no
+        // service, no permission — always available on Android. The constant exists so JS built
+        // against a newer lib can tell an older BINARY (which reads `undefined`) apart, the same
+        // publish-or-don't idiom as displayMediaSupported.
+        constants.put("supportsFrameSource", true);
         constants.put("recordingsDirectory", recordingsDirectory());
         return constants;
     }
@@ -962,6 +967,26 @@ public class WebRTCModule extends ReactContextBaseJavaModule {
     @ReactMethod
     public void getDisplayMedia(ReadableMap constraints, Promise promise) {
         ThreadUtils.runOnExecutor(() -> getUserMediaImpl.getDisplayMedia(constraints, promise));
+    }
+
+    /**
+     * {@code {sourceTag, fps?}} → a stream whose video track is the native view with that React
+     * tag, sampled on a timer (the whiteboard). Not wrapped in runOnExecutor here: the impl must
+     * first resolve the view on the UI thread, and hops to the executor itself for the track.
+     */
+    @ReactMethod
+    public void getWhiteboardMedia(ReadableMap constraints, Promise promise) {
+        int sourceTag = constraints != null && constraints.hasKey("sourceTag") ? constraints.getInt("sourceTag") : -1;
+        int fps = constraints != null && constraints.hasKey("fps") ? constraints.getInt("fps") : 10;
+        getUserMediaImpl.getWhiteboardMedia(sourceTag, fps, promise);
+    }
+
+    /** {@code {uri, fps?}} → a stream whose video track re-emits one decoded still image. */
+    @ReactMethod
+    public void getPictureMedia(ReadableMap constraints, Promise promise) {
+        String uri = constraints != null && constraints.hasKey("uri") ? constraints.getString("uri") : null;
+        int fps = constraints != null && constraints.hasKey("fps") ? constraints.getInt("fps") : 2;
+        ThreadUtils.runOnExecutor(() -> getUserMediaImpl.getPictureMedia(uri, fps, promise));
     }
 
     @ReactMethod

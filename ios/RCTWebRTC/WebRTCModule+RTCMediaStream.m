@@ -10,11 +10,16 @@
 #import "WebRTCModule+RTCPeerConnection.h"
 #import "WebRTCModuleOptions.h"
 
+#import <React/RCTConvert.h>
+#import <React/RCTUIManager.h>
+
 #import "ProcessorProvider.h"
 #import "ScreenCaptureController.h"
 #import "ScreenCapturer.h"
 #import "TrackCapturerEventsEmitter.h"
 #import "VideoCaptureController.h"
+#import "ViewCaptureController.h"
+#import "ViewFrameCapturer.h"
 
 @implementation WebRTCModule (RTCMediaStream)
 
@@ -205,6 +210,143 @@ RCT_EXPORT_METHOD(getDisplayMedia : (NSDictionary *)constraints resolver : (RCTP
 
     self.localStreams[mediaStreamId] = mediaStream;
     resolve(@{@"streamId" : mediaStreamId, @"track" : trackInfo});
+#endif
+}
+
+#pragma mark - View source (whiteboard / picture)
+
+#if TARGET_OS_IOS
+
+// The view-capture sibling of createScreenCaptureVideoTrack. Same source/track/controller shape;
+// videoSourceForScreenCast:YES on purpose — a whiteboard IS screen-like content (sharp strokes,
+// low motion), so the encoder's detail-over-framerate bias is what we want.
+- (RTCVideoTrack *)createViewSourceTrackWithController:(ViewCaptureController **)outController {
+    RTCVideoSource *videoSource = [self.peerConnectionFactory videoSourceForScreenCast:YES];
+    NSString *trackUUID = [[NSUUID UUID] UUIDString];
+    RTCVideoTrack *videoTrack = [self.peerConnectionFactory videoTrackWithSource:videoSource trackId:trackUUID];
+
+    ViewFrameCapturer *capturer = [[ViewFrameCapturer alloc] initWithDelegate:videoSource];
+    ViewCaptureController *controller = [[ViewCaptureController alloc] initWithCapturer:capturer];
+
+    TrackCapturerEventsEmitter *emitter = [[TrackCapturerEventsEmitter alloc] initWith:trackUUID webRTCModule:self];
+    controller.eventsDelegate = emitter;
+    videoTrack.captureController = controller;
+
+    if (outController) {
+        *outController = controller;
+    }
+    return videoTrack;
+}
+
+// Register the track+stream and hand JS the same shape getDisplayMedia does — but NOT born muted:
+// view/image frames flow from the first tick, there is no picker/consent to wait on.
+- (void)resolveViewSourceTrack:(RTCVideoTrack *)videoTrack resolver:(RCTPromiseResolveBlock)resolve {
+    NSString *mediaStreamId = [[NSUUID UUID] UUIDString];
+    RTCMediaStream *mediaStream = [self.peerConnectionFactory mediaStreamWithStreamId:mediaStreamId];
+    [mediaStream addVideoTrack:videoTrack];
+
+    self.localTracks[videoTrack.trackId] = videoTrack;
+    self.localStreams[mediaStreamId] = mediaStream;
+
+    NSDictionary *trackInfo = @{
+        @"enabled" : @(videoTrack.isEnabled),
+        @"id" : videoTrack.trackId,
+        @"kind" : videoTrack.kind,
+        @"muted" : @NO,
+        @"readyState" : @"live",
+        @"remote" : @(NO)
+    };
+    resolve(@{@"streamId" : mediaStreamId, @"track" : trackInfo});
+}
+
+// Decode a local file / file:// / data: URI to a UIImage. The image picker hands a local file,
+// so no network read is expected; dataWithContentsOfURL: is only a last resort for a bare URL.
+- (UIImage *)decodeImageFromUri:(NSString *)uri {
+    if (uri.length == 0) {
+        return nil;
+    }
+    if ([uri hasPrefix:@"data:"]) {
+        NSRange comma = [uri rangeOfString:@","];
+        if (comma.location == NSNotFound) {
+            return nil;
+        }
+        NSString *b64 = [uri substringFromIndex:comma.location + 1];
+        NSData *data = [[NSData alloc] initWithBase64EncodedString:b64
+                                                          options:NSDataBase64DecodingIgnoreUnknownCharacters];
+        return data ? [UIImage imageWithData:data] : nil;
+    }
+    NSString *path = [uri hasPrefix:@"file://"] ? [[NSURL URLWithString:uri] path] : uri;
+    UIImage *image = [UIImage imageWithContentsOfFile:path];
+    if (image) {
+        return image;
+    }
+    NSURL *url = [NSURL URLWithString:uri];
+    NSData *data = url ? [NSData dataWithContentsOfURL:url] : nil;
+    return data ? [UIImage imageWithData:data] : nil;
+}
+
+#endif
+
+/**
+ * `getWhiteboardMedia({ sourceTag, fps })` — the native `canvas.captureStream(fps)`. Samples the
+ * mounted view identified by `sourceTag` (a React tag) at `fps` (default 10) and resolves a
+ * MediaStream carrying one video track. Runs on the module's serial queue; the ONLY main-thread
+ * work is resolving the view, after which it hops back so the localTracks/localStreams writes
+ * stay on _workerQueue with every other method's.
+ */
+RCT_EXPORT_METHOD(getWhiteboardMedia : (NSDictionary *)constraints resolver : (RCTPromiseResolveBlock)resolve rejecter : (RCTPromiseRejectBlock)reject) {
+#if !TARGET_OS_IOS
+    reject(@"unsupported_platform", @"View capture is iOS only", nil);
+#else
+    NSNumber *sourceTag = [RCTConvert NSNumber:constraints[@"sourceTag"]];
+    NSInteger fps = constraints[@"fps"] ? [RCTConvert NSInteger:constraints[@"fps"]] : 10;
+    if (sourceTag == nil) {
+        reject(@"DOMException", @"NotFoundError", nil);
+        return;
+    }
+
+    __weak __typeof__(self) weakSelf = self;
+    RCTUIManager *uiManager = [self.bridge moduleForClass:[RCTUIManager class]];
+    [uiManager addUIBlock:^(RCTUIManager *manager, NSDictionary<NSNumber *, UIView *> *viewRegistry) {
+        UIView *view = viewRegistry[sourceTag];
+        if (![view isKindOfClass:[UIView class]]) {
+            reject(@"DOMException", @"NotFoundError", nil);
+            return;
+        }
+        __typeof__(self) strongSelf = weakSelf;
+        if (!strongSelf) {
+            reject(@"DOMException", @"AbortError", nil);
+            return;
+        }
+        dispatch_async(strongSelf.methodQueue, ^{
+            ViewCaptureController *controller = nil;
+            RTCVideoTrack *videoTrack = [strongSelf createViewSourceTrackWithController:&controller];
+            [controller startCaptureWithView:view fps:fps];
+            [strongSelf resolveViewSourceTrack:videoTrack resolver:resolve];
+        });
+    }];
+#endif
+}
+
+/**
+ * `getPictureMedia({ uri, fps })` — present a still image as a video track. Same view source, one
+ * decoded frame re-emitted at a low `fps` (default 2) to keep the track flowing.
+ */
+RCT_EXPORT_METHOD(getPictureMedia : (NSDictionary *)constraints resolver : (RCTPromiseResolveBlock)resolve rejecter : (RCTPromiseRejectBlock)reject) {
+#if !TARGET_OS_IOS
+    reject(@"unsupported_platform", @"View capture is iOS only", nil);
+#else
+    NSString *uri = [RCTConvert NSString:constraints[@"uri"]];
+    NSInteger fps = constraints[@"fps"] ? [RCTConvert NSInteger:constraints[@"fps"]] : 2;
+    UIImage *image = [self decodeImageFromUri:uri];
+    if (image == nil) {
+        reject(@"DOMException", @"NotSupportedError", nil);
+        return;
+    }
+    ViewCaptureController *controller = nil;
+    RTCVideoTrack *videoTrack = [self createViewSourceTrackWithController:&controller];
+    [controller startCaptureWithImage:image fps:fps];
+    [self resolveViewSourceTrack:videoTrack resolver:resolve];
 #endif
 }
 

@@ -129,12 +129,49 @@ Idle-cost is zero for ordinary 1:1 calls; a pure-Java test suite covers the bus
 - `mediaDevices.supportsDisplayMedia` — a native constant saying whether `getDisplayMedia()` on
   *this build* can deliver a frame (iOS: extension bundled, App Group entitled, Info.plist keys
   present; Android: foreground service enabled and permitted). Gate the feature on it.
+  On iOS it is `YES` only when **all four** of these hold — `isDisplayMediaSupported`
+  (`ios/RCTWebRTC/WebRTCModule.m`) checks them in order and returns `NO` on the first miss, with
+  no log: (1) a real device — Simulator/macOS/tvOS is always `NO`; (2) `RTCAppGroupIdentifier` and
+  `RTCScreenSharingExtension` in the app's `Info.plist`; (3) the App Group *entitlement* on the
+  running build (`containerURLForSecurityApplicationGroupIdentifier:` is nil when the profile is
+  not entitled — the key in the plist is not enough); (4) the extension bundled under `PlugIns/`
+  as a `com.apple.broadcast-services-upload` appex. Consumers get all four from
+  `react-native-siperb-phone`'s `siperb_broadcast_extension!` Podfile helper.
 - The iOS screen track is created **`muted`** and fires `unmute` when the Broadcast Upload
   Extension connects — the only signal that the user tapped *Start Broadcast* rather than
   dismissing the picker. `ended` fires when the broadcast stops.
 - `BroadcastExtension/` — the extension half as its own pod (`SiperbBroadcastExtension`): an
   `RPBroadcastSampleHandler` that streams ReplayKit frames to the host app over the App Group
   socket. Add it to the extension target, not the app.
+
+### View source that streams a canvas — `getWhiteboardMedia` / `getPictureMedia`
+The React Native analogue of the web's `canvas.captureStream(fps)`: a native **view** (or a decoded
+still image) is rasterised into an `RTCVideoSource` and sampled on a timer, so the pixels never
+cross the bridge. It is the in-process sibling of screen capture — `ViewFrameCapturer` plays the
+role of the screen capturer on both platforms: on iOS it feeds the same `didCaptureVideoFrame:` →
+`RTCVideoFrame` path as `ScreenCapturer`; on Android it is a `VideoCapturer` drawing the view to the
+`SurfaceTextureHelper`'s Surface with a software `Canvas`, the same helper → `CapturerObserver`
+machinery `ScreenCapturerAndroid` uses, minus the `VirtualDisplay`. Because the source is in-process
+there is **no extension, App Group, entitlement, plist key or Simulator gate on iOS, and no
+MediaProjection, foreground service or runtime permission on Android**. Use it for a whiteboard (draw
+with any renderer; the layer is what streams) or to present a picture.
+- `mediaDevices.supportsFrameSource` — a native constant, `true` on both platforms wherever the code
+  is present. Unlike `supportsDisplayMedia` it depends on no app packaging; its only job is version
+  skew (an OTA JS bundle reaching an older binary reads it `undefined` and withholds the builders).
+- `mediaDevices.getWhiteboardMedia({ sourceTag, fps? })` — sample the mounted view whose React tag is
+  `sourceTag` (its `findNodeHandle`) at `fps` (default 10; a drawing is near-static, so keep it low).
+  Resolves a `MediaStream` with one video track that delivers from the first tick (never born muted).
+  `videoSourceForScreenCast:YES` under the hood — a whiteboard is screen-like content, so the
+  encoder favours sharp strokes over frame rate.
+- `mediaDevices.getPictureMedia({ uri, fps? })` — present a still (local file / `file://` / `data:`
+  URI) as a video track, re-emitted at a low `fps` (default 2) to keep the track flowing.
+- The tick runs on the main/UI thread on both platforms. iOS: `drawViewHierarchyInRect:afterScreenUpdates:NO`,
+  which captures GPU-composited content — Skia/Metal — that `-[CALayer renderInContext:]` cannot; a
+  target view that deallocates ends the track cleanly (`capturerDidEnd:`). Android: `View.draw()` into
+  `Surface.lockCanvas()` — a **software** canvas, so a hardware-only layer (a GL/Vulkan surface) draws
+  blank, but `react-native-svg` (the whiteboard renderer) draws through the ordinary Canvas and captures
+  exactly; a target view that is garbage-collected stops the tick. Android resolves the view through
+  the Paper `UIManagerModule` (`resolveView(tag)`), so it needs the classic renderer.
 
 ### iOS audio session control — `RTCAudioSession`
 `audioSessionDidActivate()` / `audioSessionDidDeactivate()` for apps that run WebRTC in

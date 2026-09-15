@@ -2,6 +2,12 @@ import { NativeModules } from 'react-native';
 
 import getDisplayMedia, { Constraints as DisplayMediaConstraints } from './getDisplayMedia';
 import getUserMedia, { Constraints as UserMediaConstraints } from './getUserMedia';
+import {
+    getPictureMedia,
+    getWhiteboardMedia,
+    PictureConstraints,
+    WhiteboardConstraints
+} from './getViewMedia';
 import { Event, EventTarget, getEventAttributeValue, setEventAttributeValue } from './vendor/event-target-shim';
 
 const { WebRTCModule } = NativeModules;
@@ -26,6 +32,17 @@ class MediaDevices extends EventTarget<MediaDevicesEventMap> {
      */
     get supportsDisplayMedia(): boolean {
         return WebRTCModule?.displayMediaSupported === true;
+    }
+
+    /**
+     * Whether {@link getWhiteboardMedia} / {@link getPictureMedia} exist on THIS build. In-process
+     * view capture needs no extension, App Group or entitlement, so this is simply true wherever
+     * the native code is present; the point is version skew — an OTA JS bundle reaching an older
+     * binary reads the absent constant as false, and a host that gates on
+     * `typeof mediaDevices.getWhiteboardMedia` should delete those methods where this is false.
+     */
+    get supportsFrameSource(): boolean {
+        return WebRTCModule?.supportsFrameSource === true;
     }
 
     get ondevicechange() {
@@ -65,6 +82,27 @@ class MediaDevices extends EventTarget<MediaDevicesEventMap> {
      */
     getUserMedia(constraints: UserMediaConstraints) {
         return getUserMedia(constraints);
+    }
+
+    /**
+     * The native `canvas.captureStream(fps)`: sample a mounted view (by its React tag) into a
+     * video track. Present a live drawing surface as a whiteboard.
+     *
+     * @param {WhiteboardConstraints} constraints `{ sourceTag, fps? }`
+     * @returns {Promise<MediaStream>}
+     */
+    getWhiteboardMedia(constraints: WhiteboardConstraints) {
+        return getWhiteboardMedia(constraints);
+    }
+
+    /**
+     * Present a still image (a local/data URI) as a video track.
+     *
+     * @param {PictureConstraints} constraints `{ uri, fps? }`
+     * @returns {Promise<MediaStream>}
+     */
+    getPictureMedia(constraints: PictureConstraints) {
+        return getPictureMedia(constraints);
     }
 }
 

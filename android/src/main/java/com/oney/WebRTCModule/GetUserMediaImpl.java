@@ -3,13 +3,20 @@ package com.oney.WebRTCModule;
 import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.media.projection.MediaProjectionManager;
 import android.media.projection.MediaProjectionConfig;
+import android.net.Uri;
+import android.util.Base64;
 import android.util.DisplayMetrics;
 import android.util.Log;
 import android.os.Build;
+import android.view.View;
 
 import androidx.core.util.Consumer;
+
+import com.facebook.react.uimanager.UIManagerModule;
 
 import com.facebook.react.bridge.Arguments;
 import com.facebook.react.bridge.BaseActivityEventListener;
@@ -474,6 +481,123 @@ class GetUserMediaImpl {
         ScreenCaptureController screenCaptureController = new ScreenCaptureController(
                 reactContext.getCurrentActivity(), width, height, mediaProjectionPermissionResultData, resolutionScale);
         return createVideoTrack(screenCaptureController);
+    }
+
+    // MARK: View / image frame source (whiteboard, picture)
+
+    /** Longest side of a view/image source; a whiteboard needs sharpness, not 4K. */
+    private static final int FRAME_SOURCE_MAX_SIDE = 720;
+
+    /**
+     * Fit {@code w}x{@code h} inside FRAME_SOURCE_MAX_SIDE, keeping aspect, both sides even (the
+     * encoder wants even dimensions) and at least 2.
+     */
+    private static int[] fitFrameSource(int w, int h) {
+        float scale = Math.min(1f, (float) FRAME_SOURCE_MAX_SIDE / Math.max(w, h));
+        int fw = Math.max(2, ((int) (w * scale)) & ~1);
+        int fh = Math.max(2, ((int) (h * scale)) & ~1);
+        return new int[] {fw, fh};
+    }
+
+    /**
+     * Resolve a stream whose one video track is a {@link ViewCaptureController} source; the shape
+     * getDisplayMedia's caller already reads ({@code {streamId, track}}). A view track is NOT
+     * born muted — frames flow from the first tick.
+     */
+    private void resolveFrameSourceTrack(VideoTrack track, Promise promise) {
+        if (track == null) {
+            promise.reject(new RuntimeException("Frame source track is null."));
+            return;
+        }
+        createStream(new MediaStreamTrack[] {track}, (streamId, tracksInfo) -> {
+            if (tracksInfo.size() == 0) {
+                promise.reject(new RuntimeException("No frame source track info found."));
+                return;
+            }
+            WritableMap data = Arguments.createMap();
+            data.putString("streamId", streamId);
+            data.putMap("track", tracksInfo.get(0));
+            promise.resolve(data);
+        });
+    }
+
+    /**
+     * A video track whose frames are the native view with React tag {@code sourceTag} — the
+     * whiteboard's canvas-that-streams. The view is resolved on the UI thread (the only thread
+     * that may read it), then the track is built on the executor like every other local track,
+     * so localTracks/localStreams are only ever written there.
+     */
+    void getWhiteboardMedia(int sourceTag, int fps, Promise promise) {
+        UIManagerModule uiManager = reactContext.getNativeModule(UIManagerModule.class);
+        if (uiManager == null) {
+            promise.reject("NotSupportedError", "UIManager unavailable (frame source needs the Paper renderer).");
+            return;
+        }
+        uiManager.addUIBlock(nativeViewHierarchyManager -> {
+            View view;
+            try {
+                view = nativeViewHierarchyManager.resolveView(sourceTag);
+            } catch (Exception e) {
+                view = null;
+            }
+            if (view == null) {
+                promise.reject("NotFoundError", "No view for sourceTag " + sourceTag);
+                return;
+            }
+            // Read the size on the UI thread too; an unlaid-out view (0x0) gets a portrait default
+            // rather than a 2x2 stream nobody can see.
+            int vw = view.getWidth();
+            int vh = view.getHeight();
+            int[] size = (vw > 0 && vh > 0) ? fitFrameSource(vw, vh) : new int[] {720, 1280};
+            final View target = view;
+            ThreadUtils.runOnExecutor(() -> {
+                ViewCaptureController controller =
+                        new ViewCaptureController(size[0], size[1], fps > 0 ? fps : 10, target);
+                resolveFrameSourceTrack(createVideoTrack(controller), promise);
+            });
+        });
+    }
+
+    /**
+     * A video track that re-emits one still image decoded from {@code uri} — data: URI, file
+     * path / file:// URI, or content:// URI. Runs entirely on the executor.
+     */
+    void getPictureMedia(String uri, int fps, Promise promise) {
+        Bitmap bitmap = decodeImage(uri);
+        if (bitmap == null) {
+            promise.reject("NotSupportedError", "Could not decode image: " + uri);
+            return;
+        }
+        int[] size = fitFrameSource(bitmap.getWidth(), bitmap.getHeight());
+        ViewCaptureController controller =
+                new ViewCaptureController(size[0], size[1], fps > 0 ? fps : 2, bitmap);
+        resolveFrameSourceTrack(createVideoTrack(controller), promise);
+    }
+
+    private Bitmap decodeImage(String uri) {
+        if (uri == null || uri.isEmpty()) {
+            return null;
+        }
+        try {
+            if (uri.startsWith("data:")) {
+                int comma = uri.indexOf(',');
+                if (comma < 0) {
+                    return null;
+                }
+                byte[] bytes = Base64.decode(uri.substring(comma + 1), Base64.DEFAULT);
+                return BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
+            }
+            if (uri.startsWith("content:")) {
+                try (java.io.InputStream in = reactContext.getContentResolver().openInputStream(Uri.parse(uri))) {
+                    return in == null ? null : BitmapFactory.decodeStream(in);
+                }
+            }
+            String path = uri.startsWith("file://") ? Uri.parse(uri).getPath() : uri;
+            return path == null ? null : BitmapFactory.decodeFile(path);
+        } catch (Exception e) {
+            Log.w(TAG, "decodeImage failed for " + uri, e);
+            return null;
+        }
     }
 
     VideoTrack createVideoTrack(AbstractVideoCaptureController videoCaptureController) {

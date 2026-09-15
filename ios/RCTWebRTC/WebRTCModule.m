@@ -38,14 +38,33 @@
  * getDisplayMedia altogether, so shared code that feature-detects it reads "not supported"
  * instead of presenting a black screen.
  *
+ * `supportsFrameSource` is what mediaDevices.supportsFrameSource answers from: whether
+ * getWhiteboardMedia()/getPictureMedia() exist on THIS build. Unlike screen share the source is
+ * in-process (a rasterised view / decoded image), so there is no extension, App Group, entitlement
+ * or Simulator gate — it is simply YES wherever the code is present. The point of the constant is
+ * version skew: an OTA JS bundle reaching an older binary reads the absent key as false and the
+ * package withholds the builders (publish-or-don't), rather than calling a method that is not there.
+ *
  * Nothing here may touch UIKit — requiresMainQueueSetup is NO above.
  */
 - (NSDictionary *)constantsToExport {
     return @{
         @"callRecordingSupportsVideo" : @YES,
         @"displayMediaSupported" : @([self isDisplayMediaSupported]),
+        @"supportsFrameSource" : @([self isFrameSourceSupported]),
         @"recordingsDirectory" : [WebRTCModule recordingsDirectory],
     };
+}
+
+// In-process view/image capture works on every iOS build (device and Simulator); tvOS/macOS have
+// no UIKit view-capture path here. Stated as a method so the constant stays a one-liner and the
+// gate lives beside isDisplayMediaSupported.
+- (BOOL)isFrameSourceSupported {
+#if TARGET_OS_IOS
+    return YES;
+#else
+    return NO;
+#endif
 }
 
 /**
