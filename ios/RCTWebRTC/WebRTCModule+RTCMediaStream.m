@@ -305,17 +305,21 @@ RCT_EXPORT_METHOD(getWhiteboardMedia : (NSDictionary *)constraints resolver : (R
         return;
     }
 
+    // The tag → UIView lookup goes through RCTViewRegistry on the MAIN queue, not through
+    // RCTUIManager.addUIBlock: (1) addUIBlock asserts the UIManager queue and this method runs on
+    // the module's worker queue — an RCTAssert, i.e. SIGABRT in a debug build; (2) addUIBlock's
+    // registry is Paper's, so under Fabric (the New Architecture) the board view is never in it.
+    // RCTViewRegistry answers for both renderers and is what RN injects for exactly this use.
     __weak __typeof__(self) weakSelf = self;
-    RCTUIManager *uiManager = [self.bridge moduleForClass:[RCTUIManager class]];
-    [uiManager addUIBlock:^(RCTUIManager *manager, NSDictionary<NSNumber *, UIView *> *viewRegistry) {
-        UIView *view = viewRegistry[sourceTag];
-        if (![view isKindOfClass:[UIView class]]) {
-            reject(@"DOMException", @"NotFoundError", nil);
-            return;
-        }
+    dispatch_async(dispatch_get_main_queue(), ^{
         __typeof__(self) strongSelf = weakSelf;
         if (!strongSelf) {
             reject(@"DOMException", @"AbortError", nil);
+            return;
+        }
+        UIView *view = [strongSelf.viewRegistry_DEPRECATED viewForReactTag:sourceTag];
+        if (![view isKindOfClass:[UIView class]]) {
+            reject(@"DOMException", @"NotFoundError", nil);
             return;
         }
         dispatch_async(strongSelf.methodQueue, ^{
@@ -324,7 +328,7 @@ RCT_EXPORT_METHOD(getWhiteboardMedia : (NSDictionary *)constraints resolver : (R
             [controller startCaptureWithView:view fps:fps];
             [strongSelf resolveViewSourceTrack:videoTrack resolver:resolve];
         });
-    }];
+    });
 #endif
 }
 

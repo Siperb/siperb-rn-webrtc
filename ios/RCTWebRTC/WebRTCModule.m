@@ -18,6 +18,12 @@
 
 @implementation WebRTCModule
 
+// RN injects the view registry into a module that synthesizes this property (RCTBridgeModule.h).
+// It is how getWhiteboardMedia resolves a React tag to a UIView on BOTH renderers: RCTUIManager's
+// addUIBlock registry is Paper-only (a Fabric <View> is never in it) and addUIBlock asserts the
+// UIManager queue, which this module's methodQueue is not. Main-queue only.
+@synthesize viewRegistry_DEPRECATED = _viewRegistry_DEPRECATED;
+
 + (BOOL)requiresMainQueueSetup {
     return NO;
 }
