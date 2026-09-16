@@ -88,7 +88,29 @@ public final class ConferenceMixManager {
         mainAudioProcessing.setBypassFlagForCapturePost(true);
         mainAudioProcessing.setBypassFlagForRenderPre(true);
         mainAudioProcessing.setCapturePostProcessing(new HostCaptureMixer());
+        mainAudioProcessing.setRenderPreProcessing(new HostRenderMixer());
         return mainAudioProcessing;
+    }
+
+    /**
+     * An aux source (a presented file's soundtrack) joins the bus, and the render hook wakes
+     * up so the presenter hears it through WebRTC's own playout.
+     *
+     * THROUGH THE PLAYOUT, NOT A SECOND PLAYER, and that is the whole point: what APM's
+     * render stage plays is what the echo canceller uses as its reference, so the file that
+     * leaves the loudspeaker is subtracted from the microphone by construction - by AEC3 and
+     * by a hardware AEC alike, on any route. A MediaPlayer playing the same file beside
+     * WebRTC would be outside that reference and come straight back in through the mic.
+     */
+    public void attachAux(String auxId) {
+        bus.addAux(auxId);
+        if (mainAudioProcessing != null) mainAudioProcessing.setBypassFlagForRenderPre(false);
+    }
+
+    /** The aux leaves; the render hook goes back to bypass once nothing is left to play. */
+    public void detachAux(String auxId) {
+        bus.removeAux(auxId);
+        if (!bus.hasAux() && mainAudioProcessing != null) mainAudioProcessing.setBypassFlagForRenderPre(true);
     }
 
     /**
@@ -180,6 +202,61 @@ public final class ConferenceMixManager {
                 for (int c = 0; c < channels; c++) {
                     pcm.put(f * channels + c, v);
                 }
+            }
+        }
+    }
+
+    /**
+     * Adds the aux sources' local copy INTO the playout frame. Additive - the far end's audio
+     * in the buffer is untouched - and a pass-through when nothing is attached.
+     *
+     * Same buffer shape as HostCaptureMixer (FloatS16, band 0, see the notes there). Only at
+     * the bus rate: the bus drains 48 kHz frames, and a playout running at another rate would
+     * need a resampler this hook does not have, so it does nothing there rather than play
+     * the file at the wrong pitch - on that route the presenter does not hear the local copy,
+     * which is the lesser fault (the far end still gets it through the capture path).
+     */
+    private final class HostRenderMixer implements ExternalAudioProcessingFactory.AudioProcessing {
+        private int sampleRate;
+        private int channels = 1;
+        private short[] out = new short[0];
+        private short[] scratch = new short[0];
+        private int[] accumulator = new int[0];
+        private boolean warnedRate;
+
+        @Override
+        public void initialize(int sampleRateHz, int numChannels) {
+            sampleRate = sampleRateHz;
+            channels = Math.max(1, numChannels);
+        }
+
+        @Override
+        public void reset(int newRate) {
+            sampleRate = newRate;
+        }
+
+        @Override
+        public void process(int numBands, int numFrames, ByteBuffer buffer) {
+            if (numFrames <= 0 || !bus.hasAux()) return;
+            if (sampleRate != ConferenceAudioBus.SAMPLE_RATE) {
+                if (!warnedRate) {
+                    warnedRate = true;
+                    Log.w(TAG, "render hook at " + sampleRate + " Hz, bus is " + ConferenceAudioBus.SAMPLE_RATE
+                            + " - the presenter's local copy of the file is not played on this route");
+                }
+                return;
+            }
+            if (out.length < numFrames) out = new short[numFrames];
+            if (scratch.length < numFrames) scratch = new short[numFrames];
+            if (accumulator.length < numFrames) accumulator = new int[numFrames];
+
+            if (!bus.pullAuxSum(ConferenceAudioBus.CONSUMER_RENDER, accumulator, out, numFrames, scratch)) return;
+
+            final FloatBuffer pcm = buffer.order(ByteOrder.nativeOrder()).asFloatBuffer();
+            final int total = Math.min(numFrames * channels, pcm.remaining());
+            for (int i = 0; i < total; i++) {
+                final float v = pcm.get(i) + out[i / channels];
+                pcm.put(i, v > 32767f ? 32767f : (v < -32768f ? -32768f : v));
             }
         }
     }

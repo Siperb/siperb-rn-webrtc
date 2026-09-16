@@ -16,7 +16,9 @@ import android.view.View;
 
 import androidx.core.util.Consumer;
 
-import com.facebook.react.uimanager.UIManagerModule;
+import com.facebook.react.bridge.UIManager;
+import com.facebook.react.bridge.UiThreadUtil;
+import com.facebook.react.uimanager.UIManagerHelper;
 
 import com.facebook.react.bridge.Arguments;
 import com.facebook.react.bridge.BaseActivityEventListener;
@@ -32,6 +34,8 @@ import com.facebook.react.bridge.WritableMap;
 import com.oney.WebRTCModule.videoEffects.ProcessorProvider;
 import com.oney.WebRTCModule.videoEffects.VideoEffectProcessor;
 import com.oney.WebRTCModule.videoEffects.VideoFrameProcessor;
+
+import com.oney.WebRTCModule.filesource.FileSource;
 
 import org.webrtc.*;
 
@@ -528,17 +532,17 @@ class GetUserMediaImpl {
      * so localTracks/localStreams are only ever written there.
      */
     void getWhiteboardMedia(int sourceTag, int fps, Promise promise) {
-        UIManagerModule uiManager = reactContext.getNativeModule(UIManagerModule.class);
-        if (uiManager == null) {
-            promise.reject("NotSupportedError", "UIManager unavailable (frame source needs the Paper renderer).");
-            return;
-        }
-        uiManager.addUIBlock(nativeViewHierarchyManager -> {
-            View view;
+        // Architecture-neutral view lookup: `UIManagerHelper` hands back the Paper or the Fabric
+        // UIManager for this tag, and both implement `resolveView`. The Paper-only
+        // `UIManagerModule.addUIBlock` route rejected on every New Architecture app
+        // ("UIManager unavailable"), which is what Siperb-Mobile runs.
+        UiThreadUtil.runOnUiThread(() -> {
+            View view = null;
             try {
-                view = nativeViewHierarchyManager.resolveView(sourceTag);
+                UIManager uiManager = UIManagerHelper.getUIManagerForReactTag(reactContext, sourceTag);
+                view = uiManager == null ? null : uiManager.resolveView(sourceTag);
             } catch (Exception e) {
-                view = null;
+                Log.w(TAG, "getWhiteboardMedia: resolveView(" + sourceTag + ") failed", e);
             }
             if (view == null) {
                 promise.reject("NotFoundError", "No view for sourceTag " + sourceTag);
@@ -600,7 +604,121 @@ class GetUserMediaImpl {
         }
     }
 
+    // MARK: File source (a presented video file)
+
+    /**
+     * A video track whose frames are a video FILE decoded by a {@link FileCaptureController},
+     * with the soundtrack pushed onto the conference bus as an AUX keyed by the track's id. The
+     * resolved shape adds {@code audio} (null when the file has none), {@code duration},
+     * {@code width}/{@code height} to the frame-source one. Runs on the executor.
+     */
+    void getFileMedia(String uri, int fps, int maxSide, boolean autoplay, Promise promise) {
+        if (uri == null || uri.isEmpty()) {
+            promise.reject("NotFoundError", "getFileMedia: uri is required");
+            return;
+        }
+        Uri parsed = uri.startsWith("/") ? Uri.fromFile(new java.io.File(uri)) : Uri.parse(uri);
+        // The aux key IS the track id, so it has to be known before the track exists: the id is
+        // minted here and createVideoTrack is told to use it.
+        String trackId = UUID.randomUUID().toString();
+        FileSource source = new FileSource(reactContext, parsed, trackId);
+        try {
+            source.probe();
+        } catch (java.io.IOException e) {
+            promise.reject("NotSupportedError", "Could not open video: " + uri + " (" + e.getMessage() + ")", e);
+            return;
+        }
+        // The web caps the SHORTER side at VideoResampleSize. The capturer scales to this size
+        // itself (see FileVideoCapturer's header for why it does not leave that to WebRTC).
+        // Rotation does not change which side is shorter.
+        int outW = source.getWidth();
+        int outH = source.getHeight();
+        int shorter = Math.min(outW, outH);
+        if (maxSide > 0 && shorter > maxSide) {
+            float scale = (float) maxSide / shorter;
+            outW = Math.max(2, Math.round(outW * scale) & ~1);
+            outH = Math.max(2, Math.round(outH * scale) & ~1);
+        }
+        FileCaptureController controller = new FileCaptureController(
+                source.getWidth(), source.getHeight(), fps > 0 ? fps : 25, source, autoplay, outW, outH);
+        controller.setEventSink(body -> {
+            body.putString("trackId", trackId);
+            webRTCModule.sendEvent("fileMediaEvent", body);
+        });
+        VideoTrack track = createVideoTrack(controller, trackId);
+        if (track == null) {
+            source.release();
+            promise.reject("NotSupportedError", "Could not create the file video track");
+            return;
+        }
+        // Frames already arrive at outW x outH; this is the fps cap (a 60 fps file at 25).
+        TrackPrivate tp = tracks.get(trackId);
+        if (tp != null && tp.mediaSource instanceof VideoSource) {
+            ((VideoSource) tp.mediaSource).adaptOutputFormat(outW, outH, fps > 0 ? fps : 25);
+        }
+        final int width = source.getWidth();
+        final int height = source.getHeight();
+        final boolean hasAudio = source.hasAudio();
+        final double duration = source.getDurationSeconds();
+        createStream(new MediaStreamTrack[] {track}, (streamId, tracksInfo) -> {
+            if (tracksInfo.size() == 0) {
+                promise.reject(new RuntimeException("No file source track info found."));
+                return;
+            }
+            WritableMap data = Arguments.createMap();
+            data.putString("streamId", streamId);
+            data.putMap("track", tracksInfo.get(0));
+            if (hasAudio) {
+                WritableMap audio = Arguments.createMap();
+                audio.putString("auxId", trackId);
+                data.putMap("audio", audio);
+            } else {
+                data.putNull("audio");
+            }
+            data.putDouble("duration", duration);
+            data.putInt("width", width);
+            data.putInt("height", height);
+            data.putBoolean("playing", autoplay);
+            promise.resolve(data);
+        });
+    }
+
+    /** {@code fileMediaControl(trackId, { action, position, value })} → the playback state. */
+    void fileMediaControl(String trackId, ReadableMap command, Promise promise) {
+        TrackPrivate tp = tracks.get(trackId);
+        if (tp == null || !(tp.videoCaptureController instanceof FileCaptureController)) {
+            promise.reject("NotFoundError", "No file source for track " + trackId);
+            return;
+        }
+        FileCaptureController controller = (FileCaptureController) tp.videoCaptureController;
+        FileSource source = controller.getSource();
+        String action = command.hasKey("action") ? command.getString("action") : "";
+        switch (action == null ? "" : action) {
+            case "play":
+                source.play();
+                break;
+            case "pause":
+                source.pause();
+                break;
+            case "seek":
+                source.seekTo(command.hasKey("position") ? command.getDouble("position") : 0);
+                break;
+            case "volume":
+                source.setLocalVolume(command.hasKey("value") ? (float) command.getDouble("value") : 1f);
+                break;
+            default:
+                promise.reject("NotSupportedError", "Unknown file media action: " + action);
+                return;
+        }
+        promise.resolve(controller.state());
+    }
+
     VideoTrack createVideoTrack(AbstractVideoCaptureController videoCaptureController) {
+        return createVideoTrack(videoCaptureController, UUID.randomUUID().toString());
+    }
+
+    /** As above, with the caller choosing the track id (the file source keys its aux on it). */
+    VideoTrack createVideoTrack(AbstractVideoCaptureController videoCaptureController, String id) {
         videoCaptureController.initializeVideoCapturer();
 
         VideoCapturer videoCapturer = videoCaptureController.videoCapturer;
@@ -616,8 +734,6 @@ class GetUserMediaImpl {
             Log.d(TAG, "Error creating SurfaceTextureHelper");
             return null;
         }
-
-        String id = UUID.randomUUID().toString();
 
         TrackCapturerEventsEmitter eventsEmitter = new TrackCapturerEventsEmitter(webRTCModule, id);
         videoCaptureController.setCapturerEventsListener(eventsEmitter);

@@ -59,8 +59,17 @@ export function compileRecordingRequest(stream: MediaStream, options: MediaRecor
     const warnings: string[] = [];
     let sources: MixSource[] = [];
     let usesMerger = false;
+    let hasAux = false;
 
     for (const track of stream.getAudioTracks()) {
+        if (typeof (track as any)._auxId === 'string') {
+            // A presented file's soundtrack. The native recorder sums every aux on the bus
+            // onto the near side by itself, so it is not a source to name here — and it is
+            // not a second "local" either, which the warning below would otherwise call it.
+            hasAux = true;
+            continue;
+        }
+
         if (track instanceof MixedAudioTrack) {
             const recipe = compileMixRecipe(track._destination);
 
@@ -96,7 +105,7 @@ export function compileRecordingRequest(stream: MediaStream, options: MediaRecor
     const channels = new Set(kept.map(source => source.channel).filter(channel => channel !== null));
     const video = compileVideo(stream, options, warnings);
 
-    if (locals.length === 0 && remotes.length === 0 && !video) {
+    if (locals.length === 0 && remotes.length === 0 && !video && !hasAux) {
         throw makeDOMException('InvalidStateError', 'MediaRecorder: the stream has no live track to record');
     }
 

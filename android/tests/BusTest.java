@@ -33,6 +33,18 @@ public class BusTest {
         bus.pushLeg(id, f, N, ConferenceAudioBus.SAMPLE_RATE, 1);
     }
 
+    /** Aux membership survives clear() by design, so a fresh aux block has to drop it too. */
+    static void resetWithNoAux(ConferenceAudioBus bus) {
+        bus.clear();
+        bus.removeAux("file");
+    }
+
+    static void aux(ConferenceAudioBus bus, String id, int value) {
+        short[] f = new short[N];
+        java.util.Arrays.fill(f, (short) value);
+        bus.pushAux(id, f, N, ConferenceAudioBus.SAMPLE_RATE, 1);
+    }
+
     public static void main(String[] args) {
         ConferenceAudioBus bus = ConferenceAudioBus.getInstance();
 
@@ -159,6 +171,103 @@ public class BusTest {
         bus.pullRemoteSum(acc, out, N, scratch);
         t("a leg joining mid-recording appears in the sum with no re-attach (600 then 1000)",
                 before && out[0] == 1000);
+
+        // =====================================================================
+        // AUX sources - a presented video file's soundtrack
+        // =====================================================================
+
+        // --- every leg hears the file, and the leg's own audio is still excluded ---
+        resetWithNoAux(bus);
+        bus.addLeg("A"); bus.addLeg("B");
+        bus.addAux("file");
+        mic(bus, 100); leg(bus, "A", 1000); leg(bus, "B", 3000); aux(bus, "file", 10);
+        bus.pull("A", acc, out, N, scratch);
+        boolean auxToA = out[0] == 3110;
+        bus.pull("B", acc, out, N, scratch);
+        t("an aux reaches EVERY leg beside the mic and the other leg (3110 / 1110)",
+                auxToA && out[0] == 1110);
+
+        // --- mute silences the presenter, never the file ---
+        resetWithNoAux(bus);
+        bus.addLeg("A");
+        bus.addAux("file");
+        bus.setMicMuted(true);
+        mic(bus, 100); aux(bus, "file", 10);
+        bus.pull("A", acc, out, N, scratch);
+        t("micMuted drops the mic and NOT the aux (expect 10)", out[0] == 10);
+        bus.setMicMuted(false);
+
+        // --- the recording gets it on the NEAR side, the far side stays legs-only ---
+        resetWithNoAux(bus);
+        bus.addLeg("A");
+        bus.addAux("file");
+        leg(bus, "A", 1000); aux(bus, "file", 10);
+        bus.pullRemoteSum(acc, out, N, scratch);
+        boolean farSideClean = out[0] == 1000;
+        bus.pullAuxSum(ConferenceAudioBus.CONSUMER_RECORDING, acc, out, N, scratch);
+        t("pullRemoteSum is legs-only (1000) and pullAuxSum(recording) is the file (10)",
+                farSideClean && out[0] == 10);
+
+        // --- the render consumer hears the file and nothing else ---
+        resetWithNoAux(bus);
+        bus.addLeg("A");
+        bus.addAux("file");
+        mic(bus, 100); leg(bus, "A", 1000); aux(bus, "file", 10);
+        bus.pullAuxSum(ConferenceAudioBus.CONSUMER_RENDER, acc, out, N, scratch);
+        t("the render consumer gets the file only (expect 10)", out[0] == 10);
+
+        // --- attach order does not matter: aux before any leg ---
+        // The SDK connects the presentation source BEFORE republishMix attaches the host leg.
+        resetWithNoAux(bus);
+        bus.addAux("file");
+        for (int i = 0; i < 60; i++) aux(bus, "file", 7);   // pushed with no leg to hear it
+        bus.addLeg("late");
+        boolean staleDelivered = bus.pull("late", acc, out, N, scratch);
+        aux(bus, "file", 8);
+        bus.pull("late", acc, out, N, scratch);
+        t("a leg attached after the aux gets a fresh ring: nothing stale, then live audio (0 then 8)",
+                !staleDelivered && out[0] == 8);
+
+        // --- idempotent attach, safe detach ---
+        resetWithNoAux(bus);
+        bus.addAux("file");
+        aux(bus, "file", 5);
+        bus.addAux("file");                                  // re-attach must patch, never replace
+        bus.pullAuxSum(ConferenceAudioBus.CONSUMER_RENDER, acc, out, N, scratch);
+        boolean kept = out[0] == 5;
+        bus.removeAux("file");
+        bus.removeAux("file");                               // second removal is a no-op
+        bus.removeAux("never-added");
+        aux(bus, "file", 5);                                 // pushing after detach delivers nothing
+        boolean afterDetach = bus.pullAuxSum(ConferenceAudioBus.CONSUMER_RENDER, acc, out, N, scratch);
+        t("re-adding an aux keeps its audio; removing twice is safe; a detached aux delivers nothing",
+                kept && !afterDetach && !bus.hasAux());
+
+        // --- clear() keeps the aux (the presentation outlives the conference) ---
+        resetWithNoAux(bus);
+        bus.addLeg("A");
+        bus.addAux("file");
+        bus.clear();
+        boolean survived = bus.hasAux();
+        bus.addLeg("B");
+        aux(bus, "file", 9);
+        bus.pull("B", acc, out, N, scratch);
+        t("clear() drops the legs but keeps the aux, which the next leg then hears (expect 9)",
+                survived && out[0] == 9);
+
+        // --- the recorder's rings start empty ---
+        // The recording consumer's rings fill to capacity while nothing records; without the
+        // clear a recording started mid-call opened with half a second of stale audio.
+        resetWithNoAux(bus);
+        bus.addLeg("A");
+        bus.addAux("file");
+        for (int i = 0; i < 60; i++) { mic(bus, 3); leg(bus, "A", 4); aux(bus, "file", 5); }
+        bus.clearRecordingRings();
+        boolean remoteEmpty = !bus.pullRemoteSum(acc, out, N, scratch);
+        boolean auxEmpty = !bus.pullAuxSum(ConferenceAudioBus.CONSUMER_RECORDING, acc, out, N, scratch);
+        bus.pull("A", acc, out, N, scratch);
+        t("clearRecordingRings empties only the recording rings (leg A still hears mic+aux = 8)",
+                remoteEmpty && auxEmpty && out[0] == 8);
 
         System.out.println("\n  " + pass + " passed, " + fail + " failed");
         System.exit(fail == 0 ? 0 : 1);

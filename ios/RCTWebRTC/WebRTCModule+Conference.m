@@ -88,6 +88,18 @@ RCT_EXPORT_METHOD(conferenceDetachLeg : (NSString *)legId resolver : (RCTPromise
     resolve(@YES);
 }
 
+RCT_EXPORT_METHOD(conferenceAttachAux : (NSString *)auxId resolver : (RCTPromiseResolveBlock)
+                      resolve rejecter : (RCTPromiseRejectBlock)reject) {
+    [[SiperbConferenceMixManager sharedManager] attachAux:auxId];
+    resolve(@YES);
+}
+
+RCT_EXPORT_METHOD(conferenceDetachAux : (NSString *)auxId resolver : (RCTPromiseResolveBlock)
+                      resolve rejecter : (RCTPromiseRejectBlock)reject) {
+    [[SiperbConferenceMixManager sharedManager] detachAux:auxId];
+    resolve(@YES);
+}
+
 RCT_EXPORT_METHOD(conferenceTeardown : (RCTPromiseResolveBlock)resolve rejecter : (RCTPromiseRejectBlock)reject) {
     [[SiperbConferenceMixManager sharedManager] teardown];
     resolve(@YES);

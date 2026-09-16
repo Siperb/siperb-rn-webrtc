@@ -24,6 +24,7 @@ static NSString *const kEventPeerConnectionOnTrack = @"peerConnectionOnTrack";
 static NSString *const kEventAudioRecordingStarted = @"audioRecordingStarted";
 static NSString *const kEventAudioRecordingStopped = @"audioRecordingStopped";
 static NSString *const kEventAudioRecordingError = @"audioRecordingError";
+static NSString *const kEventFileMedia = @"fileMediaEvent";
 
 // RTCAudioSessionDelegate: microphone state for local audio tracks, implemented in
 // WebRTCModule+RTCAudioSession.m and registered in init.

@@ -81,8 +81,11 @@ export default class MediaStream extends EventTarget<MediaStreamEventMap> {
         }
     }
 
+    // `this as MediaStream` pins the handler's `this` type to the base class (the same reason
+    // MediaStreamTrack does it): left polymorphic, a subclass instance (FileMediaStream) is
+    // not assignable to MediaStream because the callback's `this` parameter is contravariant.
     get onaddtrack() {
-        return getEventAttributeValue(this, 'addtrack');
+        return getEventAttributeValue(this as MediaStream, 'addtrack');
     }
 
     set onaddtrack(value) {
@@ -90,7 +93,7 @@ export default class MediaStream extends EventTarget<MediaStreamEventMap> {
     }
 
     get onremovetrack() {
-        return getEventAttributeValue(this, 'removetrack');
+        return getEventAttributeValue(this as MediaStream, 'removetrack');
     }
 
     set onremovetrack(value) {

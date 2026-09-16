@@ -20,6 +20,8 @@
 #import "VideoCaptureController.h"
 #import "ViewCaptureController.h"
 #import "ViewFrameCapturer.h"
+#import "FileCaptureController.h"
+#import "FileFrameSource.h"
 
 @implementation WebRTCModule (RTCMediaStream)
 
@@ -257,6 +259,164 @@ RCT_EXPORT_METHOD(getDisplayMedia : (NSDictionary *)constraints resolver : (RCTP
         @"remote" : @(NO)
     };
     resolve(@{@"streamId" : mediaStreamId, @"track" : trackInfo});
+}
+
+#pragma mark - File source (a presented video file)
+
+// The file-source sibling of createViewSourceTrackWithController. videoSourceForScreenCast:NO —
+// a film is motion video, and the screencast bias (detail over framerate) is the wrong trade.
+- (RTCVideoTrack *)createFileSourceTrackWithController:(FileCaptureController **)outController
+                                                source:(FileFrameSource **)outSource
+                                           videoSource:(RTCVideoSource **)outVideoSource {
+    RTCVideoSource *videoSource = [self.peerConnectionFactory videoSourceForScreenCast:NO];
+    NSString *trackUUID = [[NSUUID UUID] UUIDString];
+    RTCVideoTrack *videoTrack = [self.peerConnectionFactory videoTrackWithSource:videoSource trackId:trackUUID];
+
+    FileFrameSource *source = [[FileFrameSource alloc] initWithDelegate:videoSource];
+    source.auxId = trackUUID;   // the soundtrack's bus key IS the video track's id
+    FileCaptureController *controller = [[FileCaptureController alloc] initWithSource:source];
+
+    TrackCapturerEventsEmitter *emitter = [[TrackCapturerEventsEmitter alloc] initWith:trackUUID webRTCModule:self];
+    controller.eventsDelegate = emitter;
+    videoTrack.captureController = controller;
+
+    __weak __typeof__(self) weakSelf = self;
+    source.onEvent = ^(NSString *type, NSDictionary *body) {
+        __typeof__(self) strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            return;
+        }
+        NSMutableDictionary *payload = [body mutableCopy];
+        payload[@"trackId"] = trackUUID;
+        [strongSelf sendEventWithName:kEventFileMedia body:payload];
+    };
+
+    if (outController) {
+        *outController = controller;
+    }
+    if (outSource) {
+        *outSource = source;
+    }
+    if (outVideoSource) {
+        *outVideoSource = videoSource;
+    }
+    return videoTrack;
+}
+
+/**
+ * `getFileMedia({ uri, fps, maxSide, autoplay })` — present a video FILE: its frames as a real
+ * video track through the file source, its soundtrack as an AUX on the native bus (see
+ * FileFrameSource). Resolves once the asset's metadata is known, with `audio` describing the
+ * aux JS should wrap as a virtual track (null when the file has no audio), and the duration.
+ */
+RCT_EXPORT_METHOD(getFileMedia : (NSDictionary *)constraints resolver : (RCTPromiseResolveBlock)resolve rejecter : (RCTPromiseRejectBlock)reject) {
+#if !TARGET_OS_IOS
+    reject(@"unsupported_platform", @"File source is iOS only", nil);
+#else
+    NSString *uri = [RCTConvert NSString:constraints[@"uri"]];
+    NSInteger fps = constraints[@"fps"] ? [RCTConvert NSInteger:constraints[@"fps"]] : 25;
+    NSInteger maxSide = constraints[@"maxSide"] ? [RCTConvert NSInteger:constraints[@"maxSide"]] : 360;
+    BOOL autoplay = constraints[@"autoplay"] ? [RCTConvert BOOL:constraints[@"autoplay"]] : NO;
+    NSURL *url = uri.length ? [NSURL URLWithString:uri] : nil;
+    if (url == nil || url.scheme == nil) {
+        url = uri.length ? [NSURL fileURLWithPath:uri] : nil;
+    }
+    if (url == nil) {
+        reject(@"DOMException", @"NotFoundError", nil);
+        return;
+    }
+
+    FileCaptureController *controller = nil;
+    FileFrameSource *source = nil;
+    RTCVideoSource *videoSource = nil;
+    RTCVideoTrack *videoTrack = [self createFileSourceTrackWithController:&controller source:&source videoSource:&videoSource];
+
+    __weak __typeof__(self) weakSelf = self;
+    [source loadURL:url fps:fps autoplay:autoplay completion:^(NSError *_Nullable error) {
+        __typeof__(self) strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            [controller dispose];
+            reject(@"DOMException", @"AbortError", nil);
+            return;
+        }
+        // Back onto the module queue: localTracks/localStreams are written there and nowhere else.
+        dispatch_async(strongSelf.methodQueue, ^{
+            if (error) {
+                [controller dispose];
+                reject(@"DOMException", @"NotSupportedError", error);
+                return;
+            }
+            // The web caps the SHORTER side at VideoResampleSize; WebRTC scales natively.
+            CGSize size = source.frameSize;
+            if (size.width > 0 && size.height > 0 && maxSide > 0) {
+                const CGFloat shorter = MIN(size.width, size.height);
+                if (shorter > maxSide) {
+                    const CGFloat scale = (CGFloat)maxSide / shorter;
+                    [videoSource adaptOutputFormatToWidth:(int)llround(size.width * scale)
+                                                   height:(int)llround(size.height * scale)
+                                                      fps:(int)fps];
+                } else {
+                    [videoSource adaptOutputFormatToWidth:(int)size.width height:(int)size.height fps:(int)fps];
+                }
+            }
+            [controller startCapture];   // frames begin (held first frame while paused)
+
+            NSString *mediaStreamId = [[NSUUID UUID] UUIDString];
+            RTCMediaStream *mediaStream = [strongSelf.peerConnectionFactory mediaStreamWithStreamId:mediaStreamId];
+            [mediaStream addVideoTrack:videoTrack];
+            strongSelf.localTracks[videoTrack.trackId] = videoTrack;
+            strongSelf.localStreams[mediaStreamId] = mediaStream;
+
+            NSDictionary *trackInfo = @{
+                @"enabled" : @(videoTrack.isEnabled),
+                @"id" : videoTrack.trackId,
+                @"kind" : videoTrack.kind,
+                @"muted" : @NO,
+                @"readyState" : @"live",
+                @"remote" : @(NO),
+                @"settings" : [controller getSettings]
+            };
+            id audio = source.hasAudio ? @{@"auxId" : videoTrack.trackId} : [NSNull null];
+            resolve(@{
+                @"streamId" : mediaStreamId,
+                @"track" : trackInfo,
+                @"audio" : audio,
+                @"duration" : @(source.duration),
+                @"width" : @((NSInteger)size.width),
+                @"height" : @((NSInteger)size.height),
+                @"playing" : @(autoplay)
+            });
+        });
+    }];
+#endif
+}
+
+/** `fileMediaControl(trackId, { action, position, value })` → the playback state. */
+RCT_EXPORT_METHOD(fileMediaControl : (nonnull NSString *)trackID command : (NSDictionary *)command resolver : (RCTPromiseResolveBlock)resolve rejecter : (RCTPromiseRejectBlock)reject) {
+#if !TARGET_OS_IOS
+    reject(@"unsupported_platform", @"File source is iOS only", nil);
+#else
+    RTCMediaStreamTrack *track = self.localTracks[trackID];
+    if (![track.captureController isKindOfClass:[FileCaptureController class]]) {
+        reject(@"DOMException", @"NotFoundError", nil);
+        return;
+    }
+    FileFrameSource *source = ((FileCaptureController *)track.captureController).source;
+    NSString *action = [RCTConvert NSString:command[@"action"]];
+    if ([action isEqualToString:@"play"]) {
+        [source play];
+    } else if ([action isEqualToString:@"pause"]) {
+        [source pause];
+    } else if ([action isEqualToString:@"seek"]) {
+        [source seekToSeconds:[RCTConvert double:command[@"position"]]];
+    } else if ([action isEqualToString:@"volume"]) {
+        [source setLocalVolume:[RCTConvert float:command[@"value"]]];
+    } else {
+        reject(@"DOMException", @"NotSupportedError", nil);
+        return;
+    }
+    resolve([source state]);
+#endif
 }
 
 // Decode a local file / file:// / data: URI to a UIImage. The image picker hands a local file,
@@ -566,6 +726,10 @@ RCT_EXPORT_METHOD(mediaStreamTrackRelease : (nonnull NSString *)trackID) {
     if (track) {
         track.isEnabled = NO;
         [track.captureController stopCapture];
+        // The file controller's player/tap/timer retain it, so dealloc never runs on its own.
+        if ([track.captureController respondsToSelector:@selector(dispose)]) {
+            [track.captureController dispose];
+        }
         [self.localTracks removeObjectForKey:trackID];
     }
 #endif

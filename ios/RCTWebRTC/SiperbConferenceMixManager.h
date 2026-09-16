@@ -68,4 +68,14 @@
 - (NSArray<NSString *> *)legIds;
 - (void)setMicMuted:(BOOL)muted;
 
+/**
+ * Put an AUX source - a presented file's soundtrack, keyed by its video track id - on the
+ * bus: every leg's outbound mix sums it, and the render hook plays the presenter's copy
+ * through WebRTC's playout so it sits in the echo canceller's reference. Idempotent. Not a
+ * leg, and bound to the bus rather than to a leg, so attach order does not matter.
+ */
+- (void)attachAux:(NSString *)auxId;
+/** Take an aux off the bus. Safe for one never attached, or already gone. */
+- (void)detachAux:(NSString *)auxId;
+
 @end

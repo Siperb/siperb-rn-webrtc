@@ -10,6 +10,12 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)startCapture;
 - (void)stopCapture;
+/**
+ * Release what the controller owns beyond the capture itself. A no-op for the camera, screen
+ * and view controllers; the file controller uses it to tear down its player, tap and timer,
+ * which retain it and would otherwise keep it alive past mediaStreamTrackRelease.
+ */
+- (void)dispose;
 - (NSDictionary *)getSettings;
 - (void)applyConstraints:(NSDictionary *)constraints error:(NSError **)outError;
 

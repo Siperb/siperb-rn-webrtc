@@ -58,6 +58,7 @@
         @"callRecordingSupportsVideo" : @YES,
         @"displayMediaSupported" : @([self isDisplayMediaSupported]),
         @"supportsFrameSource" : @([self isFrameSourceSupported]),
+        @"supportsFileSource" : @([self isFrameSourceSupported]),
         @"recordingsDirectory" : [WebRTCModule recordingsDirectory],
     };
 }
@@ -276,7 +277,8 @@ RCT_EXPORT_MODULE();
         kEventPeerConnectionOnTrack,
         kEventAudioRecordingStarted,
         kEventAudioRecordingStopped,
-        kEventAudioRecordingError
+        kEventAudioRecordingError,
+        kEventFileMedia
     ];
 }
 

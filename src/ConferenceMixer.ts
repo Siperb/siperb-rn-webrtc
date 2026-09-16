@@ -73,4 +73,22 @@ export default class ConferenceMixer {
     static getLegs(): Promise<string[]> {
         return WebRTCModule.conferenceGetLegs();
     }
+
+    /**
+     * Put an AUX source on the bus — a presented file's soundtrack, keyed by its video track id.
+     *
+     * Not a leg: it has no peer connection and no mix of its own. Every leg's outbound mix
+     * sums it beside the microphone, and the native render hook plays the presenter's copy
+     * through WebRTC's own playout so it sits in the echo canceller's reference. Bound to the
+     * BUS rather than to a leg, so it does not matter whether the host leg attaches before
+     * or after it. Idempotent natively.
+     */
+    static attachAux(auxId: string): Promise<boolean> {
+        return WebRTCModule.conferenceAttachAux(auxId);
+    }
+
+    /** Take an aux source off the bus. Safe for one never attached, or already gone. */
+    static detachAux(auxId: string): Promise<boolean> {
+        return WebRTCModule.conferenceDetachAux(auxId);
+    }
 }

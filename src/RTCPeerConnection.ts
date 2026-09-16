@@ -521,7 +521,9 @@ export default class RTCPeerConnection extends EventTarget<RTCPeerConnectionEven
             // connection on the conference bus, which replaceTrack does on a sender that
             // already carries the real audio track the bus will overwrite.
             throw RTCUtil.makeDOMException('NotSupportedError',
-                'RTCPeerConnection.addTrack: a mixed audio track is attached with replaceTrack, not addTrack');
+                'RTCPeerConnection.addTrack: a virtual audio track (an AudioContext mix, a presented file\'s '
+                + 'soundtrack) is not sent directly; the mix is attached with replaceTrack, a file audio track '
+                + 'through an AudioContext graph');
         }
 
         const streamIds = streams.map(s => s.id);

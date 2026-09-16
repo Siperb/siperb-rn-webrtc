@@ -26,10 +26,19 @@ import java.util.Set;
  * cannot hear me" and is invisible in review. So each source fans its samples out into one
  * ring per consumer at PUSH time, and every consumer drains its own.
  *
- * The consumers are the legs themselves (each excluding itself) plus CONSUMER_RECORDING.
- * Fanning out at push also means consumers need not be aligned in time - the two capture
- * callbacks that drive the outbound mixes run on different threads with different clocks,
- * and nothing here requires them to agree.
+ * The consumers are the legs themselves (each excluding itself) plus CONSUMER_RECORDING,
+ * and - for AUX sources only - CONSUMER_RENDER. Fanning out at push also means consumers
+ * need not be aligned in time - the two capture callbacks that drive the outbound mixes run
+ * on different threads with different clocks, and nothing here requires them to agree.
+ *
+ * AUX SOURCES are the third kind of input: audio that is neither the microphone nor a remote
+ * party - a presented video file's soundtrack. An aux is summed into EVERY leg's mix beside
+ * the microphone (every far end hears it, a conference too), it is never muted by micMuted
+ * (mute silences the presenter, not the file), it joins the recording on the NEAR side with
+ * the mic (the web records presentation audio on the local channel), and it is the only kind
+ * of source that fans into CONSUMER_RENDER - the local playout the presenter hears, drained
+ * by the APM render hook so the file sits in the echo canceller's reference. It is NOT a
+ * leg: it has no mix of its own, and isActive() does not count it.
  *
  * THREADING. Producers are real-time audio threads - the capture callbacks and the remote
  * track sinks. Consumers are whichever threads fill outbound buffers. Rings carry their own
@@ -52,6 +61,12 @@ public final class ConferenceAudioBus {
      * happened to be called "recording" would otherwise quietly drain the recorder's rings.
      */
     public static final String CONSUMER_RECORDING = "__recording__";
+    /**
+     * The local-playout consumer, drained by the render hook. Only AUX sources fan into it -
+     * the mic and the legs already reach the speaker through WebRTC's own playout, and
+     * fanning them here would double the per-push cost for a ring nothing drains.
+     */
+    public static final String CONSUMER_RENDER = "__render__";
     /** ~500 ms of slack per ring. Overflow drops oldest, so a stalled consumer cannot grow memory. */
     private static final int RING_CAPACITY = SAMPLE_RATE / 2;
 
@@ -71,6 +86,12 @@ public final class ConferenceAudioBus {
     public static final class BusSource extends AudioSource {
         private volatile Map<String, ShortRingBuffer> rings = Collections.emptyMap();
         private final Object ringLock = new Object();
+        /**
+         * Applied to the RENDER consumer only - the presenter's local volume for an aux
+         * source. The legs and the recording always get it at unity; turning the local copy
+         * down must not turn the far end down.
+         */
+        volatile float renderGain = 1f;
 
         BusSource() {
             super(SAMPLE_RATE, RING_CAPACITY);
@@ -98,6 +119,12 @@ public final class ConferenceAudioBus {
             for (ShortRingBuffer ring : rings.values()) ring.clear();
         }
 
+        /** Drop one consumer's buffered audio and keep the ring. No-op for an unknown consumer. */
+        void clearRing(String consumerId) {
+            final ShortRingBuffer ring = rings.get(consumerId);
+            if (ring != null) ring.clear();
+        }
+
         /**
          * Drain this source's frame for one consumer.
          *
@@ -122,6 +149,12 @@ public final class ConferenceAudioBus {
 
     /** Remote legs by id. COPY-ON-WRITE - replaced wholesale, never mutated in place. */
     private volatile Map<String, BusSource> legs = Collections.emptyMap();
+    /**
+     * Aux sources by id (a presented file's soundtrack, keyed by its video track id). COPY-ON-
+     * WRITE like legs. Membership OUTLIVES a conference - clear() prunes their leg rings and
+     * keeps them, because a presentation is not over when the third party leaves.
+     */
+    private volatile Map<String, BusSource> aux = Collections.emptyMap();
     /** Every consumer currently drawing from the bus: one per leg, plus the recording. */
     private volatile Set<String> consumers = Collections.singleton(CONSUMER_RECORDING);
     private final Object legLock = new Object();
@@ -167,10 +200,67 @@ public final class ConferenceAudioBus {
         fanOut(source);
     }
 
+    /**
+     * Feed one aux source. No-op for an aux that is not on the bus - so a file that keeps
+     * decoding after detach costs nothing and delivers nothing.
+     */
+    public void pushAux(String auxId, short[] interleaved, int totalSamples, int sampleRate, int channels) {
+        final BusSource source = aux.get(auxId);
+        if (source == null) return;
+        source.push(interleaved, totalSamples, sampleRate, channels);
+        fanOut(source);
+    }
+
     private void fanOut(BusSource source) {
         synchronized (fanLock) {
             source.fanOut(fanStaging);
         }
+    }
+
+    /**
+     * Register an aux source. Idempotent - a second attach for a live file must not discard
+     * the rings it is mid-way through filling.
+     *
+     * An aux gains a ring for every consumer there is - each leg's mix, the recording, and
+     * the render consumer - and every leg added LATER gains one on it (addLeg). So attach
+     * order does not matter: the SDK connects the presentation source before it attaches the
+     * host leg, and the leg still finds a fresh, empty ring waiting.
+     */
+    public void addAux(String auxId) {
+        if (auxId == null || CONSUMER_RECORDING.equals(auxId) || CONSUMER_RENDER.equals(auxId)) return;
+        synchronized (legLock) {
+            if (aux.containsKey(auxId)) return;
+
+            final BusSource source = new BusSource();
+            for (String consumerId : consumers) source.ensureConsumer(consumerId);
+            source.ensureConsumer(CONSUMER_RENDER);
+
+            final Map<String, BusSource> next = new LinkedHashMap<>(aux);
+            next.put(auxId, source);
+            aux = Collections.unmodifiableMap(next);
+        }
+    }
+
+    /** Take an aux source off the bus. Safe for one never added, and for a second removal. */
+    public void removeAux(String auxId) {
+        if (auxId == null) return;
+        synchronized (legLock) {
+            if (!aux.containsKey(auxId)) return;
+            final Map<String, BusSource> next = new LinkedHashMap<>(aux);
+            next.remove(auxId);
+            aux = Collections.unmodifiableMap(next);
+        }
+    }
+
+    public boolean hasAux() {
+        return !aux.isEmpty();
+    }
+
+    /** Local-playout gain for one aux, 0..1. Affects CONSUMER_RENDER only. No-op for an unknown aux. */
+    public void setAuxRenderGain(String auxId, float gain) {
+        final BusSource source = aux.get(auxId);
+        if (source == null) return;
+        source.renderGain = gain < 0f ? 0f : (gain > 1f ? 1f : gain);
     }
 
     /**
@@ -200,6 +290,7 @@ public final class ConferenceAudioBus {
                 source.ensureConsumer(consumerId);
                 mic.ensureConsumer(consumerId);
                 for (BusSource existing : legs.values()) existing.ensureConsumer(consumerId);
+                for (BusSource existing : aux.values()) existing.ensureConsumer(consumerId);
             }
 
             legs = Collections.unmodifiableMap(nextLegs);
@@ -220,6 +311,7 @@ public final class ConferenceAudioBus {
 
             mic.removeConsumer(legId);
             for (BusSource remaining : nextLegs.values()) remaining.removeConsumer(legId);
+            for (BusSource a : aux.values()) a.removeConsumer(legId);
 
             legs = Collections.unmodifiableMap(nextLegs);
             consumers = Collections.unmodifiableSet(nextConsumers);
@@ -250,6 +342,9 @@ public final class ConferenceAudioBus {
             for (String consumerId : consumers) {
                 if (!CONSUMER_RECORDING.equals(consumerId)) {
                     mic.removeConsumer(consumerId);
+                    // Aux MEMBERSHIP survives the conference (the presentation is still
+                    // running); only the rings for the legs that just left are pruned.
+                    for (BusSource a : aux.values()) a.removeConsumer(consumerId);
                 }
             }
             legs = Collections.emptyMap();
@@ -324,8 +419,54 @@ public final class ConferenceAudioBus {
             any |= accumulate(entry.getValue(), legId, accumulator, frames, scratch);
         }
 
+        // Aux sources go to EVERY leg, and they are deliberately outside the micMuted test:
+        // mute silences the presenter, never the file they are presenting.
+        final Map<String, BusSource> auxSnapshot = aux;
+        for (BusSource a : auxSnapshot.values()) {
+            any |= accumulate(a, legId, accumulator, frames, scratch);
+        }
+
         clampInto(accumulator, out, frames);
         return any;
+    }
+
+    /**
+     * Every aux source summed for one non-leg consumer - CONSUMER_RECORDING (the recorder adds
+     * it to the NEAR side beside the mic, as the web puts presentation audio on the local
+     * channel) or CONSUMER_RENDER (the local playout the presenter hears).
+     *
+     * Separate from pullRemoteSum on purpose: the far side of a recording stays legs-only, so
+     * a transcriber reading the right channel still gets "the others" and nothing we sent.
+     */
+    public boolean pullAuxSum(String consumerId, int[] accumulator, short[] out, int frames, short[] scratch) {
+        if (consumerId == null || accumulator == null || out == null || scratch == null || frames <= 0) return false;
+
+        Arrays.fill(accumulator, 0, frames, 0);
+        boolean any = false;
+
+        final boolean render = CONSUMER_RENDER.equals(consumerId);
+        final Map<String, BusSource> snapshot = aux;
+        for (BusSource a : snapshot.values()) {
+            any |= render
+                    ? accumulateScaled(a, consumerId, a.renderGain, accumulator, frames, scratch)
+                    : accumulate(a, consumerId, accumulator, frames, scratch);
+        }
+
+        clampInto(accumulator, out, frames);
+        return any;
+    }
+
+    /**
+     * Empty the recording consumer's rings on every source, mic, legs and aux alike.
+     *
+     * The recorder drains those rings only while it runs; the rest of the time they fill to
+     * capacity and HOLD the last half second, so a recording that started mid-call opened
+     * with a burst of stale audio. Called from the recorder's start().
+     */
+    public void clearRecordingRings() {
+        mic.clearRing(CONSUMER_RECORDING);
+        for (BusSource leg : legs.values()) leg.clearRing(CONSUMER_RECORDING);
+        for (BusSource a : aux.values()) a.clearRing(CONSUMER_RECORDING);
     }
 
     /**
@@ -361,6 +502,22 @@ public final class ConferenceAudioBus {
         if (n <= 0) return false;
         for (int i = 0; i < n; i++) {
             accumulator[i] += scratch[i];
+        }
+        return true;
+    }
+
+    /**
+     * As accumulate, with a gain - the render consumer's local volume. The ring is DRAINED
+     * even at gain 0, so muting the local copy cannot let the ring saturate and replay half
+     * a second of old audio when it is turned back up (the same trap the muted mic had).
+     */
+    private static boolean accumulateScaled(
+            BusSource source, String consumerId, float gain, int[] accumulator, int frames, short[] scratch) {
+        final int n = source.drain(consumerId, scratch, frames);
+        if (n <= 0) return false;
+        if (gain <= 0f) return false;
+        for (int i = 0; i < n; i++) {
+            accumulator[i] += (int) (scratch[i] * gain);
         }
         return true;
     }

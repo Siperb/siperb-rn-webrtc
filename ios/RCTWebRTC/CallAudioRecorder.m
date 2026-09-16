@@ -170,6 +170,11 @@ static BOOL PatchWavHeaderFromLength(NSString *wavPath, NSError **error) {
     // ZEROES the accumulator it is given, which would wipe the mic if it shared _mixBuffer.
     int32_t *_busAccum;
     int16_t *_busOut;
+    // A presented file's soundtrack (the bus's aux sources), summed onto the NEAR side beside
+    // the mic - the web records presentation audio on the local channel. Own buffers for the
+    // same reason as _busAccum: the pull zeroes the accumulator it is handed.
+    int32_t *_auxAccum;
+    int16_t *_auxOut;
     NSUInteger _samplesPerWrite;  // interleaved shorts per tick
     BOOL _writeFailureLogged;
     // Last reported far-side source, so the log fires on CHANGE only and not 100x/sec.
@@ -207,6 +212,8 @@ static BOOL PatchWavHeaderFromLength(NSString *wavPath, NSError **error) {
         _writeBuffer = malloc(_samplesPerWrite * sizeof(int16_t));
         _busAccum = malloc(kSamplesPerTick * sizeof(int32_t));
         _busOut = malloc(kSamplesPerTick * sizeof(int16_t));
+        _auxAccum = malloc(kSamplesPerTick * sizeof(int32_t));
+        _auxOut = malloc(kSamplesPerTick * sizeof(int16_t));
         _lastFromBus = -1;
     }
     return self;
@@ -225,9 +232,15 @@ static BOOL PatchWavHeaderFromLength(NSString *wavPath, NSError **error) {
     free(_writeBuffer);
     free(_busAccum);
     free(_busOut);
+    free(_auxAccum);
+    free(_auxOut);
 }
 
 - (BOOL)start:(NSError **)error {
+    // The recording consumer's rings on the bus fill to capacity while nothing records and
+    // hold the last half second - drained here so a recording started mid-call does not
+    // open with stale audio.
+    [[SiperbConferenceAudioBus sharedBus] clearRecordingRings];
     _file = fopen(_wavPath.UTF8String, "wb");
     if (_file == NULL || !WriteWavHeader(_file, _stereo ? 2 : 1)) {
         if (_file != NULL) {
@@ -339,6 +352,18 @@ static BOOL PatchWavHeaderFromLength(NSString *wavPath, NSError **error) {
         int32_t *target = (_mixRight != NULL) ? _mixRight : _mixBuffer;
         for (NSUInteger i = 0; i < kSamplesPerTick; i++) {
             target[i] += _busOut[i];
+        }
+    }
+    // The presented file goes on the NEAR side (left in stereo) with the mic, whatever the
+    // far side is coming from: it is what we are playing TO the far end, so it is "us" in the
+    // recording, exactly as the web files it under the local channel.
+    if ([bus hasAux] && [bus pullAuxSumForConsumer:[SiperbConferenceAudioBus recordingConsumer]
+                                              into:_auxOut
+                                            frames:kSamplesPerTick
+                                       accumulator:_auxAccum
+                                           scratch:_pullBuffer]) {
+        for (NSUInteger i = 0; i < kSamplesPerTick; i++) {
+            _mixBuffer[i] += _auxOut[i];
         }
     }
     if (_mixRight != NULL) {

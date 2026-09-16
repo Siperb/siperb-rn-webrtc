@@ -26,6 +26,7 @@ const NATIVE_EVENTS = [
     'audioRecordingStarted',
     'audioRecordingStopped',
     'audioRecordingError',
+    'fileMediaEvent',
 ];
 
 const eventEmitter = new EventEmitter();

@@ -12,6 +12,10 @@
     // subclasses needs to override
 }
 
+- (void)dispose {
+    // subclasses that own more than the capture override
+}
+
 - (NSDictionary *)getSettings {
     // subclasses needs to override
     return @{@"deviceId" : self.deviceId};

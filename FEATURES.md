@@ -18,6 +18,7 @@ plumbing for the Siperb phone.
 | Native call recording (audio, video) | ✅ | ✅ | ❌ | ❌ |
 | `MediaRecorder` + `AudioContext` (W3C subset over the native recorder/mixer, incl. `replaceTrack(mix)` → conference leg) | ✅ | ✅ | ❌ | ❌ |
 | Native conference mixing | ✅ | ✅ | ❌ | ❌ |
+| File source that streams a video file, soundtrack included (`getFileMedia`) | ✅ MediaPlayer + MediaCodec | ✅ AVPlayer + MTAudioProcessingTap | ❌ | ❌ |
 | CallKit manual audio (`RTCAudioSession`) | – | ✅ | – | – |
 
 Android: `minSdkVersion 24`. iOS: 12.0+. **macOS** ⚠️: the Xcode project under `macos/` has
@@ -172,6 +173,56 @@ with any renderer; the layer is what streams) or to present a picture.
   blank, but `react-native-svg` (the whiteboard renderer) draws through the ordinary Canvas and captures
   exactly; a target view that is garbage-collected stops the tick. Android resolves the view through
   the Paper `UIManagerModule` (`resolveView(tag)`), so it needs the classic renderer.
+
+### File source that streams a video file, soundtrack included — `getFileMedia`
+The React Native analogue of the web's "load a file into `<video>`, then `captureStream()`". A
+native player decodes the file: its frames go into a real video track through the same capturer
+pipeline the camera and the screen use (`FileFrameSource` on iOS, `FileVideoCapturer` + `FileSource`
+on Android), and its **soundtrack goes onto the native conference bus as an AUX source** — summed
+into every leg's outbound mix beside the microphone, so the far end hears mic + file on a 1:1 call
+and on a conference alike. One `MediaStream` comes back carrying both halves, the exact shape a
+`<video>` element's `captureStream()` has, so a host assigns it to both `PresentVideoMediaStream`
+and `PresentAudioMediaStream` and the SDK's present path needs no glue.
+- `mediaDevices.supportsFileSource` — the native constant AND the three methods present; a host
+  withholds "present a video file" where this is false (OTA-vs-binary skew, a partial binary).
+- `mediaDevices.getFileMedia({ uri, fps?, maxSide?, autoplay? })` — `file://` or `content://` (a URI
+  the player can read for the whole playback: copy a picker's result, or take a persistable grant);
+  `fps` 25 and `maxSide` 360 by default (the web's canvas rate and `VideoResampleSize`: the SHORTER
+  side is capped, WebRTC scales natively); `autoplay` false by default so a host can present first and
+  `play()` once the mix is up, losing none of the opening second to the attach. Resolves a
+  `FileMediaStream`: a `FileVideoTrack` (real, `screencast: NO` — a film is motion video) plus a
+  virtual `FileAudioTrack` whose `_auxId` is the video track's id, and `stream.playback`.
+- **`stream.playback`** — HTMLMediaElement vocabulary over the native player: `play()`, `pause()`,
+  `seek(s)` / `currentTime`, `duration`, `paused`, `ended`, `volume`, and the `play` / `pause` /
+  `ended` / `timeupdate` / `error` events. `play()` after `ended` restarts from the top. **EOF does
+  not stop the track**: the last frame keeps going out (re-emitted at 2 fps) until the host stops
+  presenting — the web's last frame stays on the wire too.
+- **The presenter's copy is played by WebRTC, not by the player.** The player's own output is muted
+  and the aux is ALSO summed into the playout by the APM render-pre hook (`HostRenderMixer` /
+  `SiperbRenderAuxMixer`) — so what leaves the loudspeaker is in the echo canceller's reference by
+  construction, on every route, and does not come back through the microphone. `playback.volume`
+  is that local copy's gain and never what the far end receives.
+- **Mute mutes the presenter, not the file.** The aux is summed outside the bus's `micMuted`. While
+  the host conference leg is on the bus the microphone track's `enabled` is routed to that bus mute
+  rather than to native (`ConferenceLegBinding`), because a native `setEnabled(false)` lands
+  downstream of the capture hook and would silence the whole mixed outbound — the file and the other
+  participants with it.
+- **Hold pauses the file.** `track.enabled = false` on the video track (what the SDK does to every
+  sender track on hold) suspends picture and sound together and `enabled = true` resumes; the user's
+  own pause is a separate flag. `track.stop()` DISPOSES the player (the SDK stops a presented track
+  and never releases it, and a paused-forever decoder would leak) and ends the soundtrack.
+- **A recording gets the file on the near side** (left channel, beside the mic), as the web files
+  presentation audio under the local channel; the far side stays legs-only.
+- Android: `MediaPlayer` renders into the `SurfaceTextureHelper`'s Surface and is the clock; a
+  second, audio-only `MediaExtractor` + `MediaCodec` decode feeds the bus, paced against the player's
+  position (decoding the audio twice is the price of no player dependency). iOS: `AVPlayer` +
+  `AVPlayerItemVideoOutput` (NV12, sampled on a GCD timer so backgrounding does not stall it) and an
+  `MTAudioProcessingTap` on the item's audio mix. Both key the aux on the video track id and take
+  it off the bus at teardown themselves, so a late JS detach is a no-op.
+- Known limits: on an iOS Bluetooth HFP route the mixer refuses to mix at 16 kHz, so the far end
+  gets mic only (the existing warning fires once); `?` device checks — a portrait file's rotation
+  (Android carries it in the frame via `setFrameRotation`; if the SurfaceTexture transform already
+  rotates, that line goes), and that a muted `AVPlayer` still drives its tap (it should).
 
 ### iOS audio session control — `RTCAudioSession`
 `audioSessionDidActivate()` / `audioSessionDidDeactivate()` for apps that run WebRTC in

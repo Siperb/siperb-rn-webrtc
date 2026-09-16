@@ -1,3 +1,5 @@
+import { NativeModules } from 'react-native';
+
 import ConferenceMixer from './ConferenceMixer';
 import Logger from './Logger';
 import type MediaStreamTrack from './MediaStreamTrack';
@@ -6,6 +8,7 @@ import { getPeerConnection } from './PeerConnectionRegistry';
 import type RTCRtpSender from './RTCRtpSender';
 import { makeDOMException } from './RTCUtil';
 
+const { WebRTCModule } = NativeModules;
 const log = new Logger('conference');
 
 interface LegBinding {
@@ -107,6 +110,28 @@ export async function bindMixedTrackToSender(track: MixedAudioTrack, sender: RTC
 
         if (host) {
             hostLegId = legId;
+
+            // THE MICROPHONE'S ENABLED FLAG CHANGES MEANING WHILE THE HOST LEG IS ON THE BUS.
+            // Natively, `AudioTrack.setEnabled(false)` is applied in the send pipeline AFTER
+            // the capture hook where the bus overwrites the buffer — so it mutes the WHOLE
+            // outbound mix: the other participants and a presented file's soundtrack, not
+            // just us. The bus's own micMuted is what mutes just us. So while bound, the mic
+            // track's `enabled` is routed to the bus (MediaStreamTrack.enabled), and the
+            // native track is kept enabled; a mic already disabled at bind is re-enabled
+            // natively and muted on the bus instead, and the bus flag is set from the mic's
+            // real state either way (a leftover from a previous conference must not silence
+            // this one).
+            const mic = sender._track === track ? null : sender._track;
+            const previous = bindings.get(track)?.previousTrack ?? mic;
+
+            if (previous && !previous._isVirtual) {
+                if (!previous._enabled) {
+                    WebRTCModule.mediaStreamTrackSetEnabled(-1, previous.id, true);
+                }
+
+                ConferenceMixer.setMicMuted(!previous._enabled).catch(
+                    error => log.error(`${peerConnection._pcId} setMicMuted at bind failed`, error as Error));
+            }
         }
 
         track.context._liveSinks += 1;
@@ -156,6 +181,15 @@ export function unbindMixedTrack(track: MixedAudioTrack): Promise<void> {
 
     if (hostLegId === binding.legId) {
         hostLegId = null;
+
+        // The mic goes back under native control: apply the flag it carries, which the bus
+        // was honouring while the leg was bound. (The bus clears its own mute when the last
+        // leg leaves, and the next host bind sets it from the mic's state regardless.)
+        const previous = binding.previousTrack;
+
+        if (previous && !previous._isVirtual && previous._readyState !== 'ended') {
+            WebRTCModule.mediaStreamTrackSetEnabled(-1, previous.id, previous._enabled);
+        }
     }
 
     track.context._liveSinks -= 1;
@@ -179,4 +213,23 @@ export function unbindForPeerConnection(pcId: number): Promise<void> {
 /** The leg a mixed track is currently attached as, if any. Diagnostics and tests. */
 export function boundLegId(track: MixedAudioTrack): string | null {
     return bindings.get(track)?.legId ?? null;
+}
+
+/**
+ * The real microphone track the HOST leg's sender carried before the mix, while that leg is on
+ * the bus — the one track whose `enabled` must go to the bus rather than to native (see the
+ * note in bindMixedTrackToSender). Null when no host leg is bound.
+ */
+export function boundHostMicrophone(): MediaStreamTrack | null {
+    if (hostLegId === null) {
+        return null;
+    }
+
+    for (const binding of bindings.values()) {
+        if (binding.host) {
+            return binding.previousTrack;
+        }
+    }
+
+    return null;
 }

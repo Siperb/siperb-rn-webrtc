@@ -22,6 +22,16 @@
  * matters because the capture callbacks driving the outbound mixes belong to different
  * factories with different clocks and will never agree.
  *
+ * AUX SOURCES are the third kind of input: audio that is neither the microphone nor a remote
+ * party - a presented video file's soundtrack. An aux is summed into EVERY leg's mix beside
+ * the microphone (every far end hears it, a conference too), it is never muted by micMuted
+ * (mute silences the presenter, not the file), it joins the recording on the NEAR side with
+ * the mic (the web records presentation audio on the local channel), and it is the only kind
+ * of source that fans into the render consumer - the local playout the presenter hears,
+ * drained by the APM render hook so the file sits in the echo canceller's reference. It is
+ * NOT a leg: it has no mix of its own, and `active` does not count it. Membership outlives a
+ * conference: `clear` prunes an aux's leg rings and keeps the aux.
+ *
  * IDLE-CHEAP BY CONTRACT: with no conference up `active` is NO and every caller is expected
  * to return before touching anything else - these hooks sit in the path of every ordinary
  * 1:1 call.
@@ -32,6 +42,8 @@
 
 /** The recording's consumer id. Not a leg, so it excludes nothing. */
 @property(class, nonatomic, readonly) NSString *recordingConsumer;
+/** The local-playout consumer id. Only AUX sources fan into it. */
+@property(class, nonatomic, readonly) NSString *renderConsumer;
 
 /** YES while at least one leg is on the bus. */
 @property(nonatomic, readonly) BOOL active;
@@ -50,6 +62,11 @@
         samples:(const int16_t *)samples
           count:(NSUInteger)count
      sampleRate:(double)sampleRate;
+/** Feed one aux source. No-op for an aux that is not on the bus. */
+- (void)pushAux:(NSString *)auxId
+        samples:(const int16_t *)samples
+          count:(NSUInteger)count
+     sampleRate:(double)sampleRate;
 
 // -- membership -------------------------------------------------------------
 /** Idempotent: a re-join must patch, never replace, or the leg's rings are discarded mid-call. */
@@ -57,6 +74,19 @@
 - (void)removeLeg:(NSString *)legId;
 /** Drops every leg, un-mutes, and DRAINS THE MICROPHONE - see the note in the implementation. */
 - (void)clear;
+
+/** Register an aux source. Idempotent; attach order relative to legs does not matter. */
+- (void)addAux:(NSString *)auxId;
+/** Take an aux off the bus. Safe for one never added, or already gone. */
+- (void)removeAux:(NSString *)auxId;
+- (BOOL)hasAux;
+/** Local-playout gain for one aux, 0..1 - the render consumer only; legs and the recording stay at unity. */
+- (void)setAuxRenderGain:(NSString *)auxId gain:(float)gain;
+/**
+ * Empty the recording consumer's rings on every source. They fill to capacity while nothing
+ * records; the recorder calls this at start so it does not open with half a second of stale audio.
+ */
+- (void)clearRecordingRings;
 
 /**
  * Is a conference up? True exactly while at least one leg is on the bus, and legs are only ever
@@ -95,5 +125,17 @@
                    frames:(NSUInteger)frames
               accumulator:(int32_t *)accumulator
                   scratch:(int16_t *)scratch;
+
+/**
+ * Every aux source summed for one non-leg consumer - `recordingConsumer` (the recorder adds it
+ * on the NEAR side beside the mic) or `renderConsumer` (the local playout, with each aux's
+ * render gain applied). Separate from pullRemoteSumInto: on purpose, so the far side of a
+ * recording stays legs-only.
+ */
+- (BOOL)pullAuxSumForConsumer:(NSString *)consumerId
+                         into:(int16_t *)out
+                       frames:(NSUInteger)frames
+                  accumulator:(int32_t *)accumulator
+                      scratch:(int16_t *)scratch;
 
 @end

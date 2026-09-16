@@ -201,3 +201,83 @@ describe('conference binding via replaceTrack', () => {
         expect(() => pc.addTrack(mix)).toThrow(expect.objectContaining({ name: 'NotSupportedError' }));
     });
 });
+
+describe('the microphone while the host leg is on the bus', () => {
+    test('mic.enabled=false goes to the bus mute, never to the native track', async () => {
+        const { mic, sender } = callLeg();
+        const ctx = new AudioContext();
+
+        await sender.replaceTrack(conferenceMix(ctx));
+        native.mediaStreamTrackSetEnabled.mockClear();
+        native.conferenceSetMicMuted.mockClear();
+
+        mic.enabled = false;
+        expect(native.conferenceSetMicMuted).toHaveBeenCalledWith(true);
+        expect(native.mediaStreamTrackSetEnabled).not.toHaveBeenCalled();
+
+        mic.enabled = true;
+        expect(native.conferenceSetMicMuted).toHaveBeenCalledWith(false);
+        expect(native.mediaStreamTrackSetEnabled).not.toHaveBeenCalled();
+        expect(mic.enabled).toBe(true);
+
+        await ctx.close();
+    });
+
+    test('a mic already disabled at bind is re-enabled natively and muted on the bus instead', async () => {
+        const { mic, sender } = callLeg();
+        const ctx = new AudioContext();
+
+        mic.enabled = false;
+        native.mediaStreamTrackSetEnabled.mockClear();
+
+        await sender.replaceTrack(conferenceMix(ctx));
+
+        expect(native.mediaStreamTrackSetEnabled).toHaveBeenCalledWith(-1, mic.id, true);
+        expect(native.conferenceSetMicMuted).toHaveBeenCalledWith(true);
+        expect(mic.enabled).toBe(false);          // the flag is still the truth for the SDK
+
+        await ctx.close();
+    });
+
+    test('unbinding hands the mic back to native with the flag it carries', async () => {
+        const { mic, sender } = callLeg();
+        const ctx = new AudioContext();
+
+        await sender.replaceTrack(conferenceMix(ctx));
+        mic.enabled = false;                       // routed to the bus while bound
+        native.mediaStreamTrackSetEnabled.mockClear();
+
+        await ctx.close();
+
+        expect(native.mediaStreamTrackSetEnabled).toHaveBeenCalledWith(-1, mic.id, false);
+
+        // And after the unbind a toggle is native again.
+        native.mediaStreamTrackSetEnabled.mockClear();
+        mic.enabled = true;
+        expect(native.mediaStreamTrackSetEnabled).toHaveBeenCalledWith(-1, mic.id, true);
+    });
+
+    test(
+        'a bind always sets the bus mute from the mic\'s real state (a leftover cannot silence a new conference)',
+        async () => {
+            const { sender } = callLeg();
+            const ctx = new AudioContext();
+
+            await sender.replaceTrack(conferenceMix(ctx));
+
+            expect(native.conferenceSetMicMuted).toHaveBeenCalledWith(false);
+            await ctx.close();
+        });
+
+    test('a child leg\'s own track is untouched: its enabled still goes native', async () => {
+        const { mic, sender } = callLeg({ siperbConferenceLegId: 'S9' });
+        const ctx = new AudioContext();
+
+        await sender.replaceTrack(conferenceMix(ctx));
+        native.mediaStreamTrackSetEnabled.mockClear();
+
+        mic.enabled = false;
+        expect(native.mediaStreamTrackSetEnabled).toHaveBeenCalledWith(-1, mic.id, false);
+        await ctx.close();
+    });
+});

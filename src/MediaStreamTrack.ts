@@ -1,5 +1,7 @@
 import { NativeModules } from 'react-native';
 
+import { boundHostMicrophone } from './ConferenceLegBinding';
+import ConferenceMixer from './ConferenceMixer';
 import { MediaTrackConstraints } from './Constraints';
 import { addListener, removeListener } from './EventEmitter';
 import Logger from './Logger';
@@ -122,6 +124,17 @@ export default class MediaStreamTrack extends EventTarget<MediaStreamTrackEventM
         this._enabled = Boolean(enabled);
 
         if (this._readyState === 'ended') {
+            return;
+        }
+
+        // While the host conference leg is on the bus, disabling the microphone natively
+        // would mute the whole outbound mix (the far end's other participants, a presented
+        // file) — the bus's own mute is the one that silences just us. ConferenceLegBinding
+        // explains; this is the one line that makes SDK mute/hold correct on a conference.
+        if (boundHostMicrophone() === this) {
+            ConferenceMixer.setMicMuted(!this._enabled).catch(
+                error => log.error(`${this.id} setMicMuted failed`, error as Error));
+
             return;
         }
 

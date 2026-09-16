@@ -207,6 +207,105 @@ static const NSUInteger kMaxFrames = 4096;
 
 @end
 
+#pragma mark - Render aux mixer
+
+/**
+ * Adds the aux sources' local copy INTO the playout frame - the presenter's copy of the file
+ * they are presenting, played through WebRTC's own render path rather than by a second
+ * player.
+ *
+ * THROUGH THE PLAYOUT ON PURPOSE: what APM's render stage plays is what the echo canceller
+ * uses as its reference, so the file that leaves the loudspeaker is subtracted from the
+ * microphone by construction - by AEC3 and by the voice-processing unit alike, on any route.
+ * An AVPlayer playing the same file beside WebRTC would be outside that reference and come
+ * straight back in through the mic on speakerphone.
+ *
+ * Additive - the far end's audio in the buffer is untouched - and a pass-through when no aux
+ * is attached. Only at the bus rate: the bus drains 48 kHz frames and this hook has no
+ * resampler, so on a 16 kHz route it does nothing rather than play the file at the wrong
+ * pitch; the presenter does not hear the local copy there, which is the lesser fault (the far
+ * end still gets it through the capture path where the rate allows).
+ */
+@interface SiperbRenderAuxMixer : NSObject <RTCAudioCustomProcessingDelegate>
+@end
+
+@implementation SiperbRenderAuxMixer {
+    int32_t _sampleRate;
+    int16_t *_mix;
+    int16_t *_scratch;
+    int32_t *_accumulator;
+    BOOL _warnedRate;
+}
+
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        _mix = malloc(kMaxFrames * sizeof(int16_t));
+        _scratch = malloc(kMaxFrames * sizeof(int16_t));
+        _accumulator = malloc(kMaxFrames * sizeof(int32_t));
+    }
+    return self;
+}
+
+- (void)dealloc {
+    free(_mix);
+    free(_scratch);
+    free(_accumulator);
+}
+
+- (void)audioProcessingInitializeWithSampleRate:(size_t)sampleRateHz channels:(size_t)channels {
+    _sampleRate = (int32_t)sampleRateHz;
+}
+
+- (void)audioProcessingRelease {
+}
+
+- (void)audioProcessingProcess:(RTCAudioBuffer *)audioBuffer {
+    SiperbConferenceAudioBus *bus = [SiperbConferenceAudioBus sharedBus];
+    if (![bus hasAux]) {
+        return;  // idle: nothing is being presented
+    }
+    const size_t frames = audioBuffer.frames;
+    const size_t channels = audioBuffer.channels;
+    if (frames == 0 || channels == 0 || frames > kMaxFrames) {
+        return;
+    }
+    double rate = (double)_sampleRate;
+    if (rate <= 0) {
+        rate = (double)frames * 100.0;
+    }
+    if ((NSUInteger)llround(rate) != (NSUInteger)SiperbAudioTargetSampleRate) {
+        if (!_warnedRate) {
+            _warnedRate = YES;
+            RCTLogWarn(@"[ConferenceMix] render is %d Hz, bus is %.0f Hz - the presenter's local copy "
+                       @"of the file is not played on this route",
+                       _sampleRate, SiperbAudioTargetSampleRate);
+        }
+        return;
+    }
+    if (![bus pullAuxSumForConsumer:[SiperbConferenceAudioBus renderConsumer]
+                               into:_mix
+                             frames:frames
+                        accumulator:_accumulator
+                            scratch:_scratch]) {
+        return;
+    }
+    // FloatS16 in, FloatS16 out; the sum is clamped so a loud file over loud far-end audio
+    // clips rather than wraps.
+    for (size_t c = 0; c < channels; c++) {
+        float *samples = [audioBuffer rawBufferForChannel:c];
+        if (samples == NULL) {
+            continue;
+        }
+        for (size_t i = 0; i < frames; i++) {
+            const float v = samples[i] + (float)_mix[i];
+            samples[i] = v > 32767.f ? 32767.f : (v < -32768.f ? -32768.f : v);
+        }
+    }
+}
+
+@end
+
 #pragma mark - Remote tap
 
 /** One remote track feeding one leg's rings. Mirrors the recorder's RemoteAudioSink. */
@@ -295,6 +394,8 @@ static const NSUInteger kMaxFrames = 4096;
 @implementation SiperbConferenceMixManager {
     SiperbCaptureFanout *_fanout;
     SiperbLegCaptureMixer *_hostMixer;
+    /** Retained here because the module's render slot is weak, like the capture one. */
+    SiperbRenderAuxMixer *_renderMixer;
 
     /** legId -> factory, for synthesised legs. */
     NSMutableDictionary<NSString *, RTCPeerConnectionFactory *> *_legFactories;
@@ -321,6 +422,7 @@ static const NSUInteger kMaxFrames = 4096;
         _fanout = [SiperbCaptureFanout new];
         _hostMixer = [SiperbLegCaptureMixer new];
         _hostMixer.feedsMicrophone = YES;
+        _renderMixer = [SiperbRenderAuxMixer new];
         _legFactories = [NSMutableDictionary new];
         _legMixers = [NSMutableDictionary new];
         _legModules = [NSMutableDictionary new];
@@ -339,6 +441,27 @@ static const NSUInteger kMaxFrames = 4096;
     [_fanout addDelegate:module.capturePostProcessingDelegate];
     [_fanout addDelegate:_hostMixer];
     module.capturePostProcessingDelegate = _fanout;
+
+    // The render slot: the local playout of a presented file (see SiperbRenderAuxMixer).
+    // Nothing else holds it today; if something ever does, it is chained rather than
+    // replaced, or one feature silently unwires the other.
+    if (module.renderPreProcessingDelegate != nil && module.renderPreProcessingDelegate != _renderMixer) {
+        RCTLogWarn(@"[ConferenceMix] render-pre slot already held by %@ - the presenter's local "
+                   @"copy of a presented file will not be played",
+                   NSStringFromClass([module.renderPreProcessingDelegate class]));
+        return;
+    }
+    module.renderPreProcessingDelegate = _renderMixer;
+}
+
+- (void)attachAux:(NSString *)auxId {
+    [[SiperbConferenceAudioBus sharedBus] addAux:auxId];
+    RCTLogInfo(@"[ConferenceMix] attachAux %@", auxId);
+}
+
+- (void)detachAux:(NSString *)auxId {
+    [[SiperbConferenceAudioBus sharedBus] removeAux:auxId];
+    RCTLogInfo(@"[ConferenceMix] detachAux %@", auxId);
 }
 
 - (RTCPeerConnectionFactory *)factoryForLeg:(NSString *)legId

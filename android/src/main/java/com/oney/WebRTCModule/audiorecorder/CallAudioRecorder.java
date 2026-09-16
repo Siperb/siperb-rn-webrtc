@@ -73,6 +73,11 @@ class CallAudioRecorder {
     // ZEROES the accumulator it is given, which would wipe the mic if it shared mixAccum.
     private final int[] busAccum = new int[SAMPLES_PER_TICK];
     private final short[] busOut = new short[SAMPLES_PER_TICK];
+    // A presented file's soundtrack (the bus's aux sources), summed onto the NEAR side beside
+    // the mic - the web records presentation audio on the local channel. Own buffers for the
+    // same reason as busAccum: pullAuxSum zeroes the accumulator it is handed.
+    private final int[] auxAccum = new int[SAMPLES_PER_TICK];
+    private final short[] auxOut = new short[SAMPLES_PER_TICK];
     // Process-wide singleton, and safe to hold: it is empty except while a conference is up,
     // which is exactly what isActive() reports.
     private final ConferenceAudioBus conferenceBus = ConferenceAudioBus.getInstance();
@@ -148,6 +153,10 @@ class CallAudioRecorder {
     }
 
     void start() {
+        // The recording consumer's rings on the bus fill to capacity while nothing records
+        // and hold the last half second - drained here so a recording started mid-call does
+        // not open with stale audio.
+        conferenceBus.clearRecordingRings();
         writerThread.start();
         handler = new Handler(writerThread.getLooper());
         startUptimeMs = SystemClock.uptimeMillis();
@@ -285,9 +294,15 @@ class CallAudioRecorder {
                     + " legs=" + conferenceBus.legIds()
                     + " taps=" + remoteSources.size() + ")");
         }
+        // The presented file goes on the NEAR side (left in stereo) with the mic, whatever
+        // the far side is coming from: it is what we are playing TO the far end, so it is
+        // "us" in the recording, exactly as the web files it under the local channel.
+        final boolean fromAux = conferenceBus.hasAux()
+                && conferenceBus.pullAuxSum(ConferenceAudioBus.CONSUMER_RECORDING, auxAccum, auxOut, samples, pullScratch);
         if (stereo) {
             Arrays.fill(mixRight, 0, samples, 0);
             accumulate(micSource, samples, mixAccum);
+            if (fromAux) addAux(samples, mixAccum);
             addRemote(samples, mixRight, fromBus);
             for (int i = 0; i < samples; i++) {
                 mixOut[i * 2] = clamp(mixAccum[i]);
@@ -298,6 +313,7 @@ class CallAudioRecorder {
             return;
         }
         accumulate(micSource, samples, mixAccum);
+        if (fromAux) addAux(samples, mixAccum);
         addRemote(samples, mixAccum, fromBus);
         for (int i = 0; i < samples; i++) {
             mixOut[i] = clamp(mixAccum[i]);
@@ -328,6 +344,13 @@ class CallAudioRecorder {
      * measured once here, on the mute path -- roughly 490 ms of audio captured while muted and
      * replayed on unmute.
      */
+    /** The aux sum pulled this tick, added into the near-side accumulator. */
+    private void addAux(int samples, int[] accumulator) {
+        for (int i = 0; i < samples; i++) {
+            accumulator[i] += auxOut[i];
+        }
+    }
+
     private void addRemote(int samples, int[] target, boolean fromBus) {
         for (RemoteSource source : remoteSources) {
             accumulate(source, samples, fromBus ? null : target);

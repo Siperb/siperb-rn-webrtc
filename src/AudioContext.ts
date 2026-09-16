@@ -46,6 +46,13 @@ export default class AudioContext extends EventTarget<AudioContextEventMap> {
      */
     _liveSinks = 0;
 
+    /**
+     * Source nodes carrying a FileAudioTrack that are currently wired. Kept so close() can let
+     * go of every aux this context holds — the SDK closes a collapsed conference's context
+     * without disconnecting its inputs first.
+     */
+    _auxSources = new Set<MediaStreamAudioSourceNode>();
+
     constructor() {
         super();
 
@@ -81,7 +88,10 @@ export default class AudioContext extends EventTarget<AudioContextEventMap> {
 
         const node = new MediaStreamAudioSourceNode(this, mediaStream);
 
-        if (this._liveSinks > 0 && mediaStream.getAudioTracks().some(track => !track.remote)) {
+        // A FileAudioTrack is exempt: an aux joins the native bus live, so it IS heard.
+        const silentLocal = (track: any) => !track.remote && typeof track._auxId !== 'string';
+
+        if (this._liveSinks > 0 && mediaStream.getAudioTracks().some(silentLocal)) {
             // The SDK adds presentation audio to a running recording / conference this way. The
             // native recorder and bus take their inputs at start/attach, so this source will
             // not be heard until the consumer is restarted. Said once, loudly, rather than
@@ -123,6 +133,10 @@ export default class AudioContext extends EventTarget<AudioContextEventMap> {
         }
 
         this._state = 'closed';
+
+        for (const source of Array.from(this._auxSources)) {
+            source._releaseAux();
+        }
 
         const detaches = this._destinations.map(destination => unbindMixedTrack(destination._track));
 

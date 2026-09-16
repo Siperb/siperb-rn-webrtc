@@ -1,6 +1,7 @@
 import { NativeModules } from 'react-native';
 
 import getDisplayMedia, { Constraints as DisplayMediaConstraints } from './getDisplayMedia';
+import { getFileMedia, FileMediaConstraints, FileMediaStream } from './getFileMedia';
 import getUserMedia, { Constraints as UserMediaConstraints } from './getUserMedia';
 import {
     getPictureMedia,
@@ -43,6 +44,19 @@ class MediaDevices extends EventTarget<MediaDevicesEventMap> {
      */
     get supportsFrameSource(): boolean {
         return WebRTCModule?.supportsFrameSource === true;
+    }
+
+    /**
+     * Whether {@link getFileMedia} can present a video file WITH its soundtrack on THIS build:
+     * the native file source, the aux bus attach and the control method all present. The
+     * constant covers OTA-vs-binary skew and the method probes cover a partial binary; a host
+     * gates its "present a video file" capability on this and withholds the feature otherwise.
+     */
+    get supportsFileSource(): boolean {
+        return WebRTCModule?.supportsFileSource === true
+            && typeof WebRTCModule?.getFileMedia === 'function'
+            && typeof WebRTCModule?.fileMediaControl === 'function'
+            && typeof WebRTCModule?.conferenceAttachAux === 'function';
     }
 
     get ondevicechange() {
@@ -103,6 +117,17 @@ class MediaDevices extends EventTarget<MediaDevicesEventMap> {
      */
     getPictureMedia(constraints: PictureConstraints) {
         return getPictureMedia(constraints);
+    }
+
+    /**
+     * Present a video FILE: its frames as a real video track, its soundtrack as a virtual audio
+     * track mixed on the native bus, transport controls on `stream.playback`.
+     *
+     * @param {FileMediaConstraints} constraints `{ uri, fps?, maxSide?, autoplay? }`
+     * @returns {Promise<FileMediaStream>}
+     */
+    getFileMedia(constraints: FileMediaConstraints): Promise<FileMediaStream> {
+        return getFileMedia(constraints);
     }
 }
 

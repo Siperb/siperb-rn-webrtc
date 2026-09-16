@@ -32,6 +32,7 @@ import java.security.MessageDigest;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import org.webrtc.*;
+import com.oney.WebRTCModule.audio.ConferenceAudioBus;
 import com.oney.WebRTCModule.audio.ConferenceMixManager;
 
 import org.webrtc.AudioSource;
@@ -195,6 +196,7 @@ public class WebRTCModule extends ReactContextBaseJavaModule {
         // against a newer lib can tell an older BINARY (which reads `undefined`) apart, the same
         // publish-or-don't idiom as displayMediaSupported.
         constants.put("supportsFrameSource", true);
+        constants.put("supportsFileSource", true);
         constants.put("recordingsDirectory", recordingsDirectory());
         return constants;
     }
@@ -982,6 +984,21 @@ public class WebRTCModule extends ReactContextBaseJavaModule {
     }
 
     /** {@code {uri, fps?}} → a stream whose video track re-emits one decoded still image. */
+    /** A presented video file: frames from the file, soundtrack as an aux on the bus. */
+    @ReactMethod
+    public void getFileMedia(ReadableMap constraints, Promise promise) {
+        String uri = constraints.hasKey("uri") ? constraints.getString("uri") : null;
+        int fps = constraints.hasKey("fps") ? constraints.getInt("fps") : 25;
+        int maxSide = constraints.hasKey("maxSide") ? constraints.getInt("maxSide") : 360;
+        boolean autoplay = constraints.hasKey("autoplay") && constraints.getBoolean("autoplay");
+        ThreadUtils.runOnExecutor(() -> getUserMediaImpl.getFileMedia(uri, fps, maxSide, autoplay, promise));
+    }
+
+    @ReactMethod
+    public void fileMediaControl(String trackId, ReadableMap command, Promise promise) {
+        ThreadUtils.runOnExecutor(() -> getUserMediaImpl.fileMediaControl(trackId, command, promise));
+    }
+
     @ReactMethod
     public void getPictureMedia(ReadableMap constraints, Promise promise) {
         String uri = constraints != null && constraints.hasKey("uri") ? constraints.getString("uri") : null;
@@ -2032,6 +2049,30 @@ public class WebRTCModule extends ReactContextBaseJavaModule {
     public void conferenceDetachLeg(String legId, Promise promise) {
         ThreadUtils.runOnExecutor(() -> {
             mConferenceMixManager.detachLeg(legId);
+            promise.resolve(true);
+        });
+    }
+
+    /**
+     * Put an AUX source - a presented file's soundtrack, keyed by its video track id - on the
+     * bus, where every leg's outbound mix and the local playout will sum it. Idempotent. It is
+     * not a leg: it has no peer connection, no factory and no mix of its own, and it is bound
+     * to the BUS rather than to a leg, so it does not matter whether the host leg attaches
+     * before or after it.
+     */
+    @ReactMethod
+    public void conferenceAttachAux(String auxId, Promise promise) {
+        ThreadUtils.runOnExecutor(() -> {
+            mConferenceMixManager.attachAux(auxId);
+            promise.resolve(true);
+        });
+    }
+
+    /** Take an aux source off the bus. Safe for one never attached, or already gone. */
+    @ReactMethod
+    public void conferenceDetachAux(String auxId, Promise promise) {
+        ThreadUtils.runOnExecutor(() -> {
+            mConferenceMixManager.detachAux(auxId);
             promise.resolve(true);
         });
     }

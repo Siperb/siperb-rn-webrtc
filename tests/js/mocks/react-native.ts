@@ -51,6 +51,26 @@ export function makeWebRTCModule() {
         conferenceTeardown: jest.fn(() => Promise.resolve(true)),
         conferenceSetMicMuted: jest.fn(() => Promise.resolve(true)),
         conferenceGetLegs: jest.fn(() => Promise.resolve([])),
+        conferenceAttachAux: jest.fn(() => Promise.resolve(true)),
+        conferenceDetachAux: jest.fn(() => Promise.resolve(true)),
+        // file source (a presented video file)
+        supportsFileSource: true,
+        getFileMedia: jest.fn((constraints: any) => Promise.resolve({
+            streamId: 'file-stream-1',
+            track: {
+                id: 'file-video-1', kind: 'video', remote: false, constraints: {}, enabled: true,
+                settings: { width: 640, height: 360, frameRate: constraints?.fps ?? 25 },
+                peerConnectionId: -1, readyState: 'live'
+            },
+            audio: { auxId: 'file-video-1', sampleRate: 44100, channels: 2 },
+            duration: 12.5, width: 640, height: 360, playing: false
+        })),
+        fileMediaControl: jest.fn((_trackId: string, command: any) => Promise.resolve({
+            playing: command.action === 'play',
+            position: command.action === 'seek' ? command.position : 0,
+            duration: 12.5,
+            ended: false
+        })),
         // misc
         checkPermission: jest.fn(() => Promise.resolve('granted')),
         requestPermission: jest.fn(() => Promise.resolve(true)),

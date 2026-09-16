@@ -23,6 +23,9 @@ import CallRecorder, {
 import ChannelMergerNode from './ChannelMergerNode';
 import ConferenceMixer from './ConferenceMixer';
 import { setupNativeEvents } from './EventEmitter';
+import FileAudioTrack from './FileAudioTrack';
+import FilePlayback, { type FilePlaybackState } from './FilePlayback';
+import FileVideoTrack from './FileVideoTrack';
 import GainNode from './GainNode';
 import Logger from './Logger';
 import mediaDevices from './MediaDevices';
@@ -57,6 +60,7 @@ import {
     type RecordingRequest,
 } from './RecordingRequest';
 import ScreenCapturePickerView from './ScreenCapturePickerView';
+import { FileMediaStream, type FileMediaConstraints } from './getFileMedia';
 
 Logger.enable(`${Logger.ROOT_PREFIX}:*`);
 
@@ -95,6 +99,12 @@ export {
     MediaStreamAudioSourceNode,
     MediaStreamAudioDestinationNode,
     MixedAudioTrack,
+    FileAudioTrack,
+    FileVideoTrack,
+    FilePlayback,
+    FileMediaStream,
+    type FileMediaConstraints,
+    type FilePlaybackState,
     MediaRecorder,
     RecordingBlob,
     BlobEvent,
