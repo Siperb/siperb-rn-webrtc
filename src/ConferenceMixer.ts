@@ -17,7 +17,12 @@ const { WebRTCModule } = NativeModules;
  *   1. `new RTCPeerConnection({ siperbConferenceLegId })` for the new leg — the factory is
  *      chosen here and can never be changed afterwards.
  *   2. {@link attachLegAudio} to give it a local track from that same factory.
- *   3. Dial, and once it answers {@link attachLeg} for BOTH legs, one of them `host: true`.
+ *   3. Dial. UNTIL A HOST LEG IS ATTACHED THE NEW LEG IS AN ORDINARY CALL: its factory's
+ *      capture passes the real microphone through untouched, so the third party hears us
+ *      during the consultation exactly as they would on any 1:1 call. (Mute is honoured
+ *      via {@link setMicMuted}, which the SDK already routes here from the dial onward.)
+ *   4. On Join, {@link attachLeg} for BOTH legs, one of them `host: true`. That attach is
+ *      what flips every synthesised leg from "sends its microphone" to "sends its mix".
  *
  * A conference between two calls that ALREADY EXIST cannot be mixed — both are on the app's
  * single factory, so both would share an outbound and one of them would hear itself. Refuse

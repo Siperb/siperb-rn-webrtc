@@ -62,6 +62,16 @@
 /** Take one leg out of the mix. The rest of the conference carries on. */
 - (void)detachLeg:(NSString *)legId;
 
+/**
+ * Is a host leg on the bus - i.e. has the conference been JOINED?
+ *
+ * The one fact that separates a synthesised leg's two lives: before the join it is an
+ * ordinary consultation call and sends its own microphone; after, it is a conference
+ * member and sends the mix. Flips at attachLeg:host:YES and back at detach/teardown.
+ * Safe to read from a capture thread.
+ */
+- (BOOL)hostAttached;
+
 /** The conference is over. Idempotent, and safe when none was ever up. */
 - (void)teardown;
 

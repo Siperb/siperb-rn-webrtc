@@ -34,7 +34,9 @@ import java.util.Map;
  *     there -- the moment two legs share a factory they share an outbound and one of them
  *     hears itself.
  *   - Each further leg is born on a factory of its own, whose capture buffer we overwrite
- *     with that leg's mix.
+ *     with that leg's mix ONCE A HOST LEG IS ON THE BUS. Until then - the consultation
+ *     phase, from the dial to the Join - it is an ordinary call sending its own microphone
+ *     (see SyntheticLeg.onBuffer).
  *
  * CAPTURE-POST, NOT THE PRE-APM HOOK, on the host factory. Anything written pre-APM is fed
  * to the echo canceller as if the microphone had heard it, and because the other party is
@@ -282,11 +284,27 @@ public final class ConferenceMixManager {
         }
 
         /**
-         * Overwrite this leg's capture with its own mix.
+         * Overwrite this leg's capture with its own mix - once there is a mix.
          *
          * The buffer handed here is the SAME memory passed on to the encoder, which is what
-         * makes the write meaningful. Its contents on arrival are a real microphone we do
-         * not want and simply discard - see the class note on why the capture still runs.
+         * makes the write meaningful. Its contents on arrival are this factory's own real
+         * microphone (see the class note on why the capture still runs), and whether that is
+         * wanted depends on WHEN this runs:
+         *
+         *   - BEFORE THE HOST JOINS the leg is an ordinary call. The SDK dials a conference
+         *     child as a plain consultation call and only builds the mix on Join, exactly as
+         *     the web does; the third party must hear us while we talk to them first. Nothing
+         *     is on the bus yet - no host leg has been attached, so no microphone is ever
+         *     pushed and pull() can only answer "nothing" - and overwriting with that sent
+         *     them SILENCE for the whole consultation. Leave the real microphone alone.
+         *   - ONCE A HOST LEG IS ON THE BUS the leg is a conference member, the microphone
+         *     reaches it through the host's push, and the buffer is overwritten with the mix.
+         *
+         * hostLegId is the one fact that separates the two, and it flips at attachLeg(host),
+         * which is the Join. Mute is honoured in both states: before the join the SDK's
+         * SetMute already routes to the bus's micMuted (the host carries ConferenceChildren
+         * from the dial, so OnConferenceMute claims it) and never disables the track, so the
+         * pass-through has to zero the buffer itself or a muted consultation transmits.
          */
         @Override
         public long onBuffer(ByteBuffer buffer, int audioFormat, int channelCount,
@@ -295,6 +313,16 @@ public final class ConferenceMixManager {
 
             final int frames = bytesRead / (2 * channelCount);
             if (frames <= 0) return captureTimeNs;
+
+            if (hostLegId == null) {
+                if (bus.isMicMuted()) {
+                    final ShortBuffer pcm = buffer.order(ByteOrder.nativeOrder()).asShortBuffer();
+                    final int n = Math.min(frames * channelCount, pcm.remaining());
+                    for (int i = 0; i < n; i++) pcm.put(i, (short) 0);
+                }
+                return captureTimeNs;
+            }
+
             if (frame.length < frames) frame = new short[frames];
             if (scratch.length < frames) scratch = new short[frames];
             if (accumulator.length < frames) accumulator = new int[frames];

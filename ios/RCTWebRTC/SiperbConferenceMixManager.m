@@ -88,7 +88,11 @@ static const NSUInteger kMaxFrames = 4096;
 // ATOMIC: read on the APM capture thread every 10 ms, written from the module queue on
 // attach/detach. A nonatomic object property across threads is a use-after-free window.
 @property(atomic, copy) NSString *legId;
-/** Only the host reads the real microphone; a synthesised leg's capture is discarded. */
+/**
+ * Only the host reads the real microphone onto the bus. A synthesised leg's capture is
+ * discarded once a host is attached (it sends the mix instead) and passed through untouched
+ * before that, while it is still an ordinary consultation call.
+ */
 @property(nonatomic, assign) BOOL feedsMicrophone;
 @end
 
@@ -136,6 +140,30 @@ static const NSUInteger kMaxFrames = 4096;
     const size_t frames = audioBuffer.frames;
     const size_t channels = audioBuffer.channels;
     if (frames == 0 || channels == 0 || frames > kMaxFrames) {
+        return;
+    }
+
+    // BEFORE THE HOST JOINS, A SYNTHESISED LEG IS AN ORDINARY CALL. The SDK dials a
+    // conference child as a plain consultation call and only builds the mix on Join, exactly
+    // as the web does - the third party must hear us while we talk to them first. Nothing is
+    // on the bus yet (no host leg is attached, so no microphone is ever pushed and pullForLeg
+    // can only answer "nothing"), and overwriting with that sent them SILENCE for the whole
+    // consultation. The buffer already holds this factory's own real microphone: leave it.
+    //
+    // Mute still applies. The SDK's SetMute already routes to the bus's micMuted during the
+    // consultation (the host carries ConferenceChildren from the dial, so OnConferenceMute
+    // claims it) and never disables the track, so a muted consultation has to be zeroed here.
+    // Ahead of the sample-rate guard on purpose: nothing is being mixed, so "conference audio
+    // disabled on this route" would be a lie.
+    if (!self.feedsMicrophone && ![[SiperbConferenceMixManager sharedManager] hostAttached]) {
+        if ([SiperbConferenceAudioBus sharedBus].micMuted) {
+            for (size_t c = 0; c < channels; c++) {
+                float *samples = [audioBuffer rawBufferForChannel:c];
+                if (samples) {
+                    memset(samples, 0, frames * sizeof(float));
+                }
+            }
+        }
         return;
     }
 
@@ -553,6 +581,12 @@ static const NSUInteger kMaxFrames = 4096;
     }
     RCTLogInfo(@"[ConferenceMix] attachLeg %@%@ taps=%lu", legId, host ? @" (host)" : @"",
                (unsigned long)legTaps.count);
+}
+
+- (BOOL)hostAttached {
+    // The host mixer's legId is what un-idles the app factory's capture hook, so it is
+    // already the authority on "a host is on the bus"; atomic, so a capture thread may read it.
+    return _hostMixer.legId != nil;
 }
 
 - (void)detachLeg:(NSString *)legId {

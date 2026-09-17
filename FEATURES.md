@@ -120,7 +120,10 @@ subset such code uses — no DSP in JS, the native recorder and mixer do the wor
 Three-way (and N-way) calls mixed natively: each remote party is sent the microphone plus every
 *other* party, never itself. Because one peer-connection factory has one outbound audio path,
 the host leg keeps the app's factory and each further leg is born on its own — declared at
-construction with `new RTCPeerConnection({ ..., siperbConferenceLegId })`.
+construction with `new RTCPeerConnection({ ..., siperbConferenceLegId })`. **Until a host leg
+is attached (the Join), a leg born that way is an ordinary call**: its capture passes the real
+microphone through, so the third party hears you during the consultation; the overwrite-with-mix
+only starts once `attachLeg(host: true)` has run.
 `attachLeg(pcId, legId, host)`, `attachLegAudio`, `detachLeg`, `teardown`, `getLegs`, and
 `setMicMuted` — mute happens *in the mix*, so it silences only you, not the whole leg.
 Idle-cost is zero for ordinary 1:1 calls; a pure-Java test suite covers the bus
