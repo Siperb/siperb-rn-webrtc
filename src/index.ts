@@ -60,6 +60,7 @@ import {
     type RecordingRequest,
 } from './RecordingRequest';
 import ScreenCapturePickerView from './ScreenCapturePickerView';
+import ScreenVideoTrack from './ScreenVideoTrack';
 import { FileMediaStream, type FileMediaConstraints } from './getFileMedia';
 
 Logger.enable(`${Logger.ROOT_PREFIX}:*`);
@@ -101,6 +102,7 @@ export {
     MixedAudioTrack,
     FileAudioTrack,
     FileVideoTrack,
+    ScreenVideoTrack,
     FilePlayback,
     FileMediaStream,
     type FileMediaConstraints,

@@ -140,7 +140,18 @@
 #endif
 
     if (hasRuntimeVideoDevice) {
-        RTCCameraVideoCapturer *videoCapturer = [[RTCCameraVideoCapturer alloc] initWithDelegate:videoSource];
+        // A PLAIN AVCaptureSession, on purpose. WebRTC-SDK 125's initWithDelegate: builds an
+        // AVCaptureMultiCamSession wherever the hardware supports one — every iPhone from the 11
+        // on — and that session's connection teardown throws an UNCATCHABLE ObjC exception on
+        // hangup: _removeConnection: → removeObserver:forKeyPath:"enabled" on an observer that was
+        // never registered (NSRangeException), seen after a start that failed with
+        // FigCaptureSourceRemote err=-17281. A plain session tolerates the same stop. Nothing here
+        // needs multicam: each capturer owns its own session with one input, the flip switches
+        // cameras sequentially and applyConstraints stops before it starts.
+        // initWithDelegate:captureSession: is public in WebRTC-SDK 125 (RTCCameraVideoCapturer.h).
+        AVCaptureSession *plainCaptureSession = [[AVCaptureSession alloc] init];
+        RTCCameraVideoCapturer *videoCapturer = [[RTCCameraVideoCapturer alloc] initWithDelegate:videoSource
+                                                                                  captureSession:plainCaptureSession];
         VideoCaptureController *videoCaptureController =
             [[VideoCaptureController alloc] initWithCapturer:videoCapturer andConstraints:constraints[@"video"]];
         videoCaptureController.enableMultitaskingCameraAccess =
@@ -738,6 +749,12 @@ RCT_EXPORT_METHOD(mediaStreamTrackRelease : (nonnull NSString *)trackID) {
 RCT_EXPORT_METHOD(mediaStreamTrackSetEnabled : (nonnull NSNumber *)pcId : (nonnull NSString *)trackID : (BOOL)enabled) {
     RTCMediaStreamTrack *track = [self trackForId:trackID pcId:pcId];
     if (track == nil) {
+        return;
+    }
+
+    // Same early return Android's mediaStreamTrackSetEnabled has: a repeated setEnabled(false)
+    // must not reach the capture controller's stopCapture a second time.
+    if (track.isEnabled == enabled) {
         return;
     }
 

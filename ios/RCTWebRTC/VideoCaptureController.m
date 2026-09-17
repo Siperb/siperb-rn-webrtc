@@ -128,6 +128,14 @@
 - (void)stopCapture {
     if (!self.running)
         return;
+    // Cleared SYNCHRONOUSLY, before the async stop, not in the completion handler on the
+    // capture-session thread: a guard written after the suspension is not a guard. Every
+    // caller on the module's serial methodQueue is already serialised by the semaphore wait
+    // below, so this covers a stopCapture re-entering from ANOTHER queue while that wait is
+    // in progress (dealloc, a constraints change), which would otherwise pass `!self.running`
+    // and call stopCaptureWithCompletionHandler twice — a double removeConnection that the
+    // capture session does not tolerate.
+    self.running = NO;
 
     RCTLog(@"[VideoCaptureController] Capture will stop");
     // Stopping the capture happens on another thread. Wait for it.
@@ -136,7 +144,6 @@
     __weak VideoCaptureController *weakSelf = self;
     [self.capturer stopCaptureWithCompletionHandler:^{
         RCTLog(@"[VideoCaptureController] Capture stopped");
-        weakSelf.running = NO;
         weakSelf.device = nil;
 
         dispatch_semaphore_signal(semaphore);

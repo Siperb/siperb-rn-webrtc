@@ -64,6 +64,9 @@ public class ScreenCaptureController extends AbstractVideoCaptureController {
 
     @Override
     public void dispose() {
+        // The listener was enabled in the constructor and only ever disabled by the projection's
+        // own onStop; a share ended by stop() + release() reached neither, and leaked it per share.
+        orientationListener.disable();
         MediaProjectionService.abort(context);
         super.dispose();
     }

@@ -3,6 +3,7 @@ import { NativeModules } from 'react-native';
 
 import MediaStream from './MediaStream';
 import MediaStreamError from './MediaStreamError';
+import ScreenVideoTrack from './ScreenVideoTrack';
 
 const { WebRTCModule } = NativeModules;
 
@@ -19,13 +20,16 @@ export default function getDisplayMedia(constraints: Constraints = {}): Promise<
             data => {
                 const { streamId, track } = data;
 
-                const info = {
+                const stream = new MediaStream({
                     streamId: streamId,
                     streamReactTag: streamId,
-                    tracks: [ track ]
-                };
+                    tracks: []
+                });
 
-                const stream = new MediaStream(info);
+                // The track is already part of the native stream — pushed rather than addTrack'd,
+                // as MediaStream's own constructor does for the tracks native hands it. A
+                // ScreenVideoTrack so that stop() releases; see that class.
+                stream._tracks.push(new ScreenVideoTrack(track));
 
                 resolve(stream);
             },

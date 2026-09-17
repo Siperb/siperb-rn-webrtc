@@ -144,6 +144,21 @@ Idle-cost is zero for ordinary 1:1 calls; a pure-Java test suite covers the bus
 - The iOS screen track is created **`muted`** and fires `unmute` when the Broadcast Upload
   Extension connects — the only signal that the user tapped *Start Broadcast* rather than
   dismissing the picker. `ended` fires when the broadcast stops.
+- **`stop()` on the screen track RELEASES** (`ScreenVideoTrack`, the sibling of `FileVideoTrack`):
+  a screen capture cannot come back from a stop — Android 14's MediaProjection token is
+  single-use and iOS's broadcast has to be started again from the picker — and the SDK stops the
+  presented track without ever calling `release()`. Releasing is what ends the share for real: on
+  Android it disposes the capturer and stops the MediaProjection **foreground service and its
+  "screen sharing" notification**, which `stopCapture()` alone leaves up for the life of the
+  process; on iOS it closes the App Group socket, and closing the **client** descriptor is what
+  the extension sees as end-of-stream and finishes its broadcast on (the streams do not own that
+  fd; `SocketConnection` closes it itself). The server fd is closed in the listening dispatch
+  source's cancel handler, never inline — closing an fd a READ source still monitors is the
+  libdispatch client abort (`Unexpected EV_VANISHED`) that an earlier version hit on hangup.
+- The camera capturer runs on a **plain `AVCaptureSession`**, not the `AVCaptureMultiCamSession`
+  WebRTC-SDK 125 picks on multicam hardware (every iPhone from the 11 on): that session's
+  connection teardown threw an uncatchable `NSRangeException` on hangup after a start that had
+  failed, and nothing here captures two cameras on one session.
 - `BroadcastExtension/` — the extension half as its own pod (`SiperbBroadcastExtension`): an
   `RPBroadcastSampleHandler` that streams ReplayKit frames to the host app over the App Group
   socket. Add it to the extension target, not the app.
