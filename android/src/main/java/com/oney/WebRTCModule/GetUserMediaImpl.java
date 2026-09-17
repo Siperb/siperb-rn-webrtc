@@ -45,6 +45,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
@@ -103,8 +104,15 @@ class GetUserMediaImpl {
 
                     mediaProjectionPermissionResultData = data;
 
-                    MediaProjectionService.launch(activity)
-                        .orTimeout(10, TimeUnit.SECONDS)
+                    CompletableFuture<Void> launchFuture = MediaProjectionService.launch(activity);
+                    // orTimeout is API 33+ (Android 13 added it to java.util.concurrent.CompletableFuture) and is NOT
+                    // covered by core-library desugaring, so calling it unconditionally NoSuchMethodError-crashes on
+                    // Android < 33. Keep the 10s safety timeout where it exists; on older Android skip it (the service
+                    // launch completes on its own — the timeout is only a guard against a hung start).
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        launchFuture = launchFuture.orTimeout(10, TimeUnit.SECONDS);
+                    }
+                    launchFuture
                         .whenCompleteAsync((value, error) -> {
                             if (error != null) {
                                 Log.e(TAG, "Failed to start MediaProjection service", error);
