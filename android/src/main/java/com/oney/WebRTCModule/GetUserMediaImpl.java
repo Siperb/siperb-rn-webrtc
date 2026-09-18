@@ -552,6 +552,12 @@ class GetUserMediaImpl {
             } catch (Exception e) {
                 Log.w(TAG, "getWhiteboardMedia: resolveView(" + sourceTag + ") failed", e);
             }
+            // Native-host fallback: a Compose / Android-View drawing surface has no React tag, so it
+            // registers its view in SiperbCaptureViewRegistry under the key it passes as sourceTag.
+            // Only consulted when the React lookup misses, so an ordinary RN board is unaffected.
+            if (view == null) {
+                view = SiperbCaptureViewRegistry.viewForKey(sourceTag);
+            }
             if (view == null) {
                 promise.reject("NotFoundError", "No view for sourceTag " + sourceTag);
                 return;

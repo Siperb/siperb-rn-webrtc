@@ -14,6 +14,7 @@
 #import <React/RCTUIManager.h>
 
 #import "ProcessorProvider.h"
+#import "SiperbCaptureViewRegistry.h"
 #import "ScreenCaptureController.h"
 #import "ScreenCapturer.h"
 #import "TrackCapturerEventsEmitter.h"
@@ -489,6 +490,12 @@ RCT_EXPORT_METHOD(getWhiteboardMedia : (NSDictionary *)constraints resolver : (R
             return;
         }
         UIView *view = [strongSelf.viewRegistry_DEPRECATED viewForReactTag:sourceTag];
+        // Native-host fallback: a SwiftUI / UIKit drawing surface has no React tag, so it registers
+        // its view in SiperbCaptureViewRegistry under the key it passes as sourceTag. Only consulted
+        // when the React lookup misses, so an ordinary RN board is unaffected.
+        if (![view isKindOfClass:[UIView class]]) {
+            view = [SiperbCaptureViewRegistry viewForKey:[sourceTag integerValue]];
+        }
         if (![view isKindOfClass:[UIView class]]) {
             reject(@"DOMException", @"NotFoundError", nil);
             return;
