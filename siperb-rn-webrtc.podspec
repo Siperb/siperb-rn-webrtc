@@ -22,9 +22,9 @@ Pod::Spec.new do |s|
   # the mixed PCM reaches AVAssetWriter as a CMSampleBuffer. Listed EXPLICITLY rather than
   # left to clang's module autolinking, which works right up until a target has modules
   # disabled — and the failure then is at link time, which reading the source never reveals.
-  # MediaToolbox is the file source's (FileFrameSource.m): MTAudioProcessingTap is how a
-  # presented video file's soundtrack is read off its AVPlayer for the conference bus.
-  s.framework           = 'AudioToolbox','AVFoundation', 'CoreAudio', 'CoreGraphics', 'CoreImage', 'CoreMedia', 'CoreVideo', 'GLKit', 'MediaToolbox', 'Metal', 'VideoToolbox'
+  # (The file source, FileFrameSource.m, reads a presented video file's soundtrack with an
+  # independent AVAssetReader — AVFoundation/CoreMedia — so MediaToolbox is no longer needed.)
+  s.framework           = 'AudioToolbox','AVFoundation', 'CoreAudio', 'CoreGraphics', 'CoreImage', 'CoreMedia', 'CoreVideo', 'GLKit', 'Metal', 'VideoToolbox'
   s.dependency          'React-Core'
   s.dependency          'WebRTC-SDK', '125.6422.07'
 end

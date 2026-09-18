@@ -15,12 +15,15 @@ typedef void (^FileFrameSourceEventBlock)(NSString *type, NSDictionary *body);
  * coming from an AVPlayer's video output instead of a rasterised view.
  *
  * ONE OBJECT OWNS BOTH HALVES. The player is the clock: its `AVPlayerItemVideoOutput` yields the
- * frames, and an `MTAudioProcessingTap` on its audio mix yields the soundtrack as PCM, which is
- * pushed onto the native conference bus as an AUX source under `auxId` (the video track's id).
- * The player's own audio output is MUTED: the presenter's copy is played by WebRTC's render hook
- * (SiperbRenderAuxMixer), which is what keeps the file inside the echo canceller's reference on
- * a loudspeaker. So play/pause/seek/ended act on picture and sound together, and teardown takes
- * both down at once.
+ * frames, and a SECOND, INDEPENDENT `AVAssetReader` decode of the audio track — paced against the
+ * player's clock — yields the soundtrack as PCM, which is pushed onto the native conference bus as
+ * an AUX source under `auxId` (the video track's id). (This replaced an `MTAudioProcessingTap` on
+ * the player's audio mix: a muted `AVPlayer` under WebRTC's PlayAndRecord audio session does not
+ * reliably clock the tap, so the soundtrack never reached the far end — the offline reader is
+ * independent of the audio session, exactly like the Android MediaCodec feeder.) The player's own
+ * audio output is MUTED: the presenter's copy is played by WebRTC's render hook (SiperbRenderAuxMixer),
+ * which is what keeps the file inside the echo canceller's reference on a loudspeaker. So
+ * play/pause/seek/ended act on picture and sound together, and teardown takes both down at once.
  *
  * TWO PAUSE FLAGS, INDEPENDENT. `userPaused` is the presenter's; `suspended` is the track being
  * disabled (the SDK disables every sender track on hold). Playing ⇔ neither is set and the file
@@ -67,7 +70,7 @@ typedef void (^FileFrameSourceEventBlock)(NSString *type, NSDictionary *body);
 /** The track was disabled (YES) or re-enabled (NO): pause/resume without forgetting a user pause. */
 - (void)setSuspended:(BOOL)suspended;
 
-/** Release everything: the player, the tap, the timer, the aux. Idempotent. */
+/** Release everything: the player, the audio reader, both timers, the aux. Idempotent. */
 - (void)teardown;
 
 @end

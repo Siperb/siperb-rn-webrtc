@@ -2,7 +2,6 @@
 
 #import "FileFrameSource.h"
 
-#import <MediaToolbox/MediaToolbox.h>
 #import <WebRTC/RTCCVPixelBuffer.h>
 #import <WebRTC/RTCVideoFrame.h>
 #import <WebRTC/RTCVideoFrameBuffer.h>
@@ -16,110 +15,27 @@ static const NSInteger kHoldFps = 2;
 /** `progress` event cadence, seconds. */
 static const NSTimeInterval kProgressInterval = 1.0;
 
-#pragma mark - The tap's context
+/** Audio feeder cadence + windows (seconds), the iOS twins of the Android AudioFeeder's. */
+static const NSTimeInterval kAudioTickSeconds = 0.02;   // 20 ms, matches the Android tick
+static const Float64 kAudioLeadSeconds = 0.30;          // decode this far ahead of the player clock
+static const Float64 kAudioLateSeconds = 0.25;          // behind by more than this: drop (resync)
+
+#pragma mark - One decoded soundtrack chunk
 
 /**
- * What the MTAudioProcessingTap callbacks see. Retained BY THE TAP (bridge-retained in
- * `clientInfo`, released in `finalize`), because the tap's callbacks can outlive the player
- * item that carried them; it holds the source only weakly, so a torn-down source is a no-op
- * `process`, never a use-after-free. The scratch buffer is allocated in `prepare`, so `process`
- * — a real-time callback — allocates nothing.
+ * A slice of the file's soundtrack: int16 MONO PCM plus the presentation time it is due at,
+ * against the player's clock. The audio feeder decodes these ahead into a FIFO and pushes each
+ * onto the conference bus as it comes due — the same shape as the Android feeder's `Chunk`.
  */
-@interface SiperbFileTapContext : NSObject
-@property(nonatomic, weak) FileFrameSource *source;
-@property(nonatomic, assign) AudioStreamBasicDescription format;
-@property(nonatomic, assign) int16_t *mono;
-@property(nonatomic, assign) CMItemCount monoCapacity;
+@interface SiperbFileAudioChunk : NSObject
+@property(nonatomic, assign) Float64 pts;   // seconds, presentation time
+@property(nonatomic, assign) double rate;   // sample rate the PCM is at
+@property(nonatomic, strong) NSData *pcm;   // int16 mono samples
+@property(nonatomic, assign) NSUInteger count;   // frames
 @end
 
-@implementation SiperbFileTapContext
-- (void)dealloc {
-    free(_mono);
-}
+@implementation SiperbFileAudioChunk
 @end
-
-static void SiperbTapInit(MTAudioProcessingTapRef tap, void *clientInfo, void **tapStorageOut) {
-    *tapStorageOut = clientInfo;
-}
-
-static void SiperbTapFinalize(MTAudioProcessingTapRef tap) {
-    SiperbFileTapContext *context = (__bridge_transfer SiperbFileTapContext *)MTAudioProcessingTapGetStorage(tap);
-    context = nil;
-}
-
-static void SiperbTapPrepare(MTAudioProcessingTapRef tap, CMItemCount maxFrames, const AudioStreamBasicDescription *format) {
-    SiperbFileTapContext *context = (__bridge SiperbFileTapContext *)MTAudioProcessingTapGetStorage(tap);
-    context.format = *format;
-    free(context.mono);
-    context.mono = calloc((size_t)maxFrames, sizeof(int16_t));
-    context.monoCapacity = maxFrames;
-}
-
-static void SiperbTapUnprepare(MTAudioProcessingTapRef tap) {
-}
-
-/** Float (interleaved or planar, any channel count) → int16 mono, onto the bus. */
-static void SiperbTapProcess(MTAudioProcessingTapRef tap,
-                             CMItemCount numberFrames,
-                             MTAudioProcessingTapFlags flags,
-                             AudioBufferList *bufferListInOut,
-                             CMItemCount *numberFramesOut,
-                             MTAudioProcessingTapFlags *flagsOut) {
-    // Pull the source audio through; the player still needs the buffers even though it is muted.
-    OSStatus status = MTAudioProcessingTapGetSourceAudio(tap, numberFrames, bufferListInOut, flagsOut, NULL, numberFramesOut);
-    if (status != noErr) {
-        return;
-    }
-    SiperbFileTapContext *context = (__bridge SiperbFileTapContext *)MTAudioProcessingTapGetStorage(tap);
-    FileFrameSource *source = context.source;
-    NSString *auxId = source.auxId;
-    if (source == nil || auxId == nil || context.mono == NULL) {
-        return;
-    }
-    const CMItemCount frames = MIN(*numberFramesOut, context.monoCapacity);
-    if (frames <= 0) {
-        return;
-    }
-    const AudioStreamBasicDescription fmt = context.format;
-    const BOOL isFloat = (fmt.mFormatFlags & kAudioFormatFlagIsFloat) != 0;
-    const BOOL planar = (fmt.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0;
-    const UInt32 channels = MAX(1u, fmt.mChannelsPerFrame);
-    int16_t *mono = context.mono;
-
-    if (!isFloat) {
-        // Not expected from an AVPlayer tap (it hands out Float32), but do not misread int16
-        // bytes as floats — that is what static sounds like.
-        return;
-    }
-    if (planar) {
-        const UInt32 bufferCount = bufferListInOut->mNumberBuffers;
-        for (CMItemCount i = 0; i < frames; i++) {
-            float sum = 0.f;
-            for (UInt32 c = 0; c < bufferCount; c++) {
-                const float *plane = (const float *)bufferListInOut->mBuffers[c].mData;
-                if (plane) {
-                    sum += plane[i];
-                }
-            }
-            const float v = (sum / (float)MAX(1u, bufferCount)) * 32767.f;
-            mono[i] = (int16_t)(v > 32767.f ? 32767.f : (v < -32768.f ? -32768.f : v));
-        }
-    } else {
-        const float *interleaved = (const float *)bufferListInOut->mBuffers[0].mData;
-        if (interleaved == NULL) {
-            return;
-        }
-        for (CMItemCount i = 0; i < frames; i++) {
-            float sum = 0.f;
-            for (UInt32 c = 0; c < channels; c++) {
-                sum += interleaved[i * channels + c];
-            }
-            const float v = (sum / (float)channels) * 32767.f;
-            mono[i] = (int16_t)(v > 32767.f ? 32767.f : (v < -32768.f ? -32768.f : v));
-        }
-    }
-    [[SiperbConferenceAudioBus sharedBus] pushAux:auxId samples:mono count:(NSUInteger)frames sampleRate:fmt.mSampleRate];
-}
 
 #pragma mark - The source
 
@@ -133,7 +49,6 @@ static void SiperbTapProcess(MTAudioProcessingTapRef tap,
 @end
 
 @implementation FileFrameSource {
-    MTAudioProcessingTapRef _tap;
     /** The last delivered frame, re-emitted while paused/ended. Guarded by _heldLock: the frame
      *  queue writes it, a seek completion (any queue) and teardown clear it. */
     CVPixelBufferRef _heldBuffer;
@@ -152,6 +67,21 @@ static void SiperbTapProcess(MTAudioProcessingTapRef tap,
     mach_timebase_info_data_t _timebaseInfo;
     int64_t _startTimeStampNs;
     NSTimeInterval _lastProgress;
+
+    // Audio: an independent AVAssetReader decode paced by the player's clock. Replaces the old
+    // MTAudioProcessingTap — a muted AVPlayer under WebRTC's audio session does not reliably
+    // clock the tap, so the soundtrack never reached the far end. The reader is offline decode,
+    // independent of the audio session and of playback, exactly like the Android MediaCodec
+    // feeder. Everything under _audioQueue.
+    AVAsset *_audioAsset;
+    AVAssetTrack *_audioTrack;
+    AVAssetReader *_audioReader;
+    AVAssetReaderTrackOutput *_audioOutput;
+    dispatch_queue_t _audioQueue;
+    dispatch_source_t _audioTimer;
+    NSMutableArray<SiperbFileAudioChunk *> *_audioFifo;
+    Float64 _audioSeekTarget;   // >= 0 → rebuild the reader from here on the next tick
+    BOOL _audioRunning;         // push only while the player is playing
 }
 
 - (instancetype)initWithDelegate:(__weak id<RTCVideoCapturerDelegate>)delegate {
@@ -163,6 +93,9 @@ static void SiperbTapProcess(MTAudioProcessingTapRef tap,
         _userPaused = YES;   // nothing plays until play (or autoplay) says so
         _suspended = YES;    // and no frames until the track's first startCapture
         _queue = dispatch_queue_create("FileFrameSource.frames", DISPATCH_QUEUE_SERIAL);
+        _audioQueue = dispatch_queue_create("FileFrameSource.audio", DISPATCH_QUEUE_SERIAL);
+        _audioFifo = [NSMutableArray array];
+        _audioSeekTarget = -1;
     }
     return self;
 }
@@ -237,22 +170,25 @@ static RTCVideoRotation RotationForTransform(CGAffineTransform t) {
     AVPlayerItemVideoOutput *output = [[AVPlayerItemVideoOutput alloc] initWithPixelBufferAttributes:attrs];
     [item addOutput:output];
 
-    if (audio != nil) {
-        [self installTapOnItem:item track:audio];
-    }
-
     AVPlayer *player = [AVPlayer playerWithPlayerItem:item];
     player.automaticallyWaitsToMinimizeStalling = NO;
     player.allowsExternalPlayback = NO;
     player.actionAtItemEnd = AVPlayerActionAtItemEndPause;
     // MUTED ON PURPOSE: the presenter hears the file through WebRTC's render hook (see the
-    // header). The tap still receives every buffer of a muted player.
+    // header). The player's own audio is never used — the soundtrack reaches both the far end
+    // and the presenter's monitor via the audio feeder → conference bus, not this AVPlayer.
     player.muted = YES;
 
     _item = item;
     _output = output;
     _player = player;
     _loaded = YES;
+
+    if (audio != nil) {
+        _audioAsset = asset;
+        _audioTrack = audio;
+        [self startAudioFeeder];
+    }
 
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(itemDidPlayToEnd:)
@@ -275,35 +211,6 @@ static RTCVideoRotation RotationForTransform(CGAffineTransform t) {
         _userPaused = NO;
     }
     [self applyPlaybackState];
-}
-
-- (void)installTapOnItem:(AVPlayerItem *)item track:(AVAssetTrack *)audio {
-    SiperbFileTapContext *context = [SiperbFileTapContext new];
-    context.source = self;
-
-    MTAudioProcessingTapCallbacks callbacks;
-    callbacks.version = kMTAudioProcessingTapCallbacksVersion_0;
-    callbacks.clientInfo = (__bridge_retained void *)context;
-    callbacks.init = SiperbTapInit;
-    callbacks.finalize = SiperbTapFinalize;
-    callbacks.prepare = SiperbTapPrepare;
-    callbacks.unprepare = SiperbTapUnprepare;
-    callbacks.process = SiperbTapProcess;
-
-    MTAudioProcessingTapRef tap = NULL;
-    OSStatus status = MTAudioProcessingTapCreate(kCFAllocatorDefault, &callbacks, kMTAudioProcessingTapCreationFlag_PreEffects, &tap);
-    if (status != noErr || tap == NULL) {
-        // The context was retained for a tap that never came: give it back.
-        CFRelease(callbacks.clientInfo);
-        _hasAudio = NO;
-        return;
-    }
-    AVMutableAudioMixInputParameters *params = [AVMutableAudioMixInputParameters audioMixInputParametersWithTrack:audio];
-    params.audioTapProcessor = tap;
-    AVMutableAudioMix *mix = [AVMutableAudioMix audioMix];
-    mix.inputParameters = @[ params ];
-    item.audioMix = mix;
-    _tap = tap;
 }
 
 #pragma mark Transport
@@ -332,6 +239,11 @@ static RTCVideoRotation RotationForTransform(CGAffineTransform t) {
         } else {
             [self startTimerAtFps:playing ? self->_fps : kHoldFps];
         }
+        // The soundtrack follows picture: pushed only while playing (topping-up continues so a
+        // chunk is always ready the moment play resumes).
+        dispatch_async(self->_audioQueue, ^{
+            self->_audioRunning = playing;
+        });
     });
 }
 
@@ -340,6 +252,7 @@ static RTCVideoRotation RotationForTransform(CGAffineTransform t) {
         // play() after the end means from the top, as the web's <video> does.
         _ended = NO;
         [_player seekToTime:kCMTimeZero toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero];
+        [self requestAudioSeek:0];
     }
     _userPaused = NO;
     [self applyPlaybackState];
@@ -359,6 +272,7 @@ static RTCVideoRotation RotationForTransform(CGAffineTransform t) {
     const BOOL wasEnded = _ended;
     _ended = NO;
     CMTime target = CMTimeMakeWithSeconds(MAX(0, seconds), 600);
+    [self requestAudioSeek:MAX(0, seconds)];
     __weak __typeof__(self) weakSelf = self;
     [_player seekToTime:target toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero completionHandler:^(BOOL finished) {
         __typeof__(self) strongSelf = weakSelf;
@@ -527,6 +441,224 @@ static RTCVideoRotation RotationForTransform(CGAffineTransform t) {
     os_unfair_lock_unlock(&_heldLock);
 }
 
+#pragma mark Audio (the feeder, on its own serial queue)
+
+/**
+ * Start the soundtrack feeder: open an AVAssetReader on the audio track and tick it. Runs on
+ * _audioQueue. If the reader will not open the far end simply gets picture only, exactly as the
+ * Android feeder logs and returns. The player's clock (_player.currentTime) is the reference
+ * both halves pace against, so picture and sound stay together.
+ */
+- (void)startAudioFeeder {
+    dispatch_async(_audioQueue, ^{
+        if (self->_torn || self->_audioTrack == nil || self->_audioAsset == nil) {
+            return;
+        }
+        if (![self buildAudioReaderFrom:0]) {
+            NSLog(@"[FileFrameSource] audio feeder could not open — the far end gets picture only");
+            return;
+        }
+        [self startAudioTimer];
+    });
+}
+
+/** (Re)build the reader from a start position. On _audioQueue. Clears the FIFO. */
+- (BOOL)buildAudioReaderFrom:(Float64)startSeconds {
+    if (_audioReader) {
+        [_audioReader cancelReading];
+        _audioReader = nil;
+        _audioOutput = nil;
+    }
+    if (_audioAsset == nil || _audioTrack == nil) {
+        return NO;
+    }
+    NSError *error = nil;
+    AVAssetReader *reader = [[AVAssetReader alloc] initWithAsset:_audioAsset error:&error];
+    if (reader == nil) {
+        return NO;
+    }
+    // Interleaved signed 16-bit PCM at the track's native rate/channels; we down-mix to mono
+    // below, matching what pushAux: expects (the bus resamples per consumer).
+    NSDictionary *settings = @{
+        AVFormatIDKey : @(kAudioFormatLinearPCM),
+        AVLinearPCMBitDepthKey : @16,
+        AVLinearPCMIsFloatKey : @NO,
+        AVLinearPCMIsBigEndianKey : @NO,
+        AVLinearPCMIsNonInterleaved : @NO,
+    };
+    AVAssetReaderTrackOutput *output = [[AVAssetReaderTrackOutput alloc] initWithTrack:_audioTrack outputSettings:settings];
+    output.alwaysCopiesSampleData = NO;
+    if (![reader canAddOutput:output]) {
+        return NO;
+    }
+    [reader addOutput:output];
+    if (startSeconds > 0) {
+        reader.timeRange = CMTimeRangeMake(CMTimeMakeWithSeconds(startSeconds, 600), kCMTimePositiveInfinity);
+    }
+    if (![reader startReading]) {
+        return NO;
+    }
+    _audioReader = reader;
+    _audioOutput = output;
+    [_audioFifo removeAllObjects];
+    return YES;
+}
+
+- (void)startAudioTimer {
+    [self stopAudioTimer];
+    dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, _audioQueue);
+    const uint64_t interval = (uint64_t)(kAudioTickSeconds * NSEC_PER_SEC);
+    dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 0), interval, interval / 5);
+    __weak __typeof__(self) weakSelf = self;
+    dispatch_source_set_event_handler(timer, ^{
+        [weakSelf audioTick];
+    });
+    dispatch_resume(timer);
+    _audioTimer = timer;
+}
+
+- (void)stopAudioTimer {
+    if (_audioTimer) {
+        dispatch_source_cancel(_audioTimer);
+        _audioTimer = nil;
+    }
+}
+
+/** Ask the feeder to rebuild from `seconds` on its next tick. Any thread. */
+- (void)requestAudioSeek:(Float64)seconds {
+    dispatch_async(_audioQueue, ^{
+        self->_audioSeekTarget = MAX(0, seconds);
+    });
+}
+
+/** One feeder tick, on _audioQueue: honour a pending seek, decode ahead, push what is due. */
+- (void)audioTick {
+    if (_torn || _audioReader == nil) {
+        return;
+    }
+    [self audioApplySeekIfNeeded];
+    [self audioTopUp];
+    [self audioPushDue];
+}
+
+- (void)audioApplySeekIfNeeded {
+    if (_audioSeekTarget < 0) {
+        return;
+    }
+    const Float64 target = _audioSeekTarget;
+    _audioSeekTarget = -1;
+    [self buildAudioReaderFrom:target];
+}
+
+- (Float64)playerPositionSeconds {
+    AVPlayer *player = _player;
+    if (player == nil) {
+        return 0;
+    }
+    const Float64 t = CMTimeGetSeconds(player.currentTime);
+    return (isfinite(t) && t > 0) ? t : 0;
+}
+
+/** Decode until the FIFO reaches kAudioLeadSeconds past the player's position (or the track ends). */
+- (void)audioTopUp {
+    const Float64 horizon = [self playerPositionSeconds] + kAudioLeadSeconds;
+    int guard = 0;
+    while (_audioReader.status == AVAssetReaderStatusReading && guard++ < 64) {
+        SiperbFileAudioChunk *last = _audioFifo.lastObject;
+        if (last != nil && last.pts >= horizon) {
+            return;
+        }
+        CMSampleBufferRef sample = [_audioOutput copyNextSampleBuffer];
+        if (sample == NULL) {
+            return;   // stalled this tick, or the track finished
+        }
+        SiperbFileAudioChunk *chunk = [self chunkFromSample:sample];
+        CFRelease(sample);
+        if (chunk) {
+            [_audioFifo addObject:chunk];
+        }
+    }
+}
+
+/** int16 interleaved (any channel count) → int16 MONO, wrapped as a chunk with its PTS. */
+- (SiperbFileAudioChunk *)chunkFromSample:(CMSampleBufferRef)sample {
+    CMFormatDescriptionRef format = CMSampleBufferGetFormatDescription(sample);
+    if (format == NULL) {
+        return nil;
+    }
+    const AudioStreamBasicDescription *asbd = CMAudioFormatDescriptionGetStreamBasicDescription(format);
+    if (asbd == NULL) {
+        return nil;
+    }
+    const UInt32 channels = MAX(1u, asbd->mChannelsPerFrame);
+    const double rate = asbd->mSampleRate > 0 ? asbd->mSampleRate : 48000;
+
+    CMBlockBufferRef block = CMSampleBufferGetDataBuffer(sample);
+    if (block == NULL) {
+        return nil;
+    }
+    size_t length = 0;
+    char *data = NULL;
+    if (CMBlockBufferGetDataPointer(block, 0, NULL, &length, &data) != kCMBlockBufferNoErr || data == NULL) {
+        return nil;
+    }
+    const NSUInteger frames = (length / sizeof(int16_t)) / channels;
+    if (frames == 0) {
+        return nil;
+    }
+    const int16_t *interleaved = (const int16_t *)data;
+    NSMutableData *mono = [NSMutableData dataWithLength:frames * sizeof(int16_t)];
+    int16_t *out = (int16_t *)mono.mutableBytes;
+    if (channels == 1) {
+        memcpy(out, interleaved, frames * sizeof(int16_t));
+    } else {
+        for (NSUInteger i = 0; i < frames; i++) {
+            int32_t sum = 0;
+            for (UInt32 c = 0; c < channels; c++) {
+                sum += interleaved[i * channels + c];
+            }
+            out[i] = (int16_t)(sum / (int32_t)channels);
+        }
+    }
+
+    Float64 pts = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sample));
+    if (!isfinite(pts) || pts < 0) {
+        pts = 0;
+    }
+    SiperbFileAudioChunk *chunk = [SiperbFileAudioChunk new];
+    chunk.pts = pts;
+    chunk.rate = rate;
+    chunk.pcm = mono;
+    chunk.count = frames;
+    return chunk;
+}
+
+/** Push every chunk that is due against the player's clock; drop what is hopelessly late. */
+- (void)audioPushDue {
+    if (!_audioRunning) {
+        return;
+    }
+    NSString *auxId = self.auxId;
+    if (auxId == nil) {
+        return;
+    }
+    const Float64 now = [self playerPositionSeconds];
+    while (_audioFifo.count > 0) {
+        SiperbFileAudioChunk *chunk = _audioFifo.firstObject;
+        if (chunk.pts > now + kAudioTickSeconds) {
+            return;   // not due yet
+        }
+        [_audioFifo removeObjectAtIndex:0];
+        if (chunk.pts < now - kAudioLateSeconds) {
+            continue;   // behind after a seek/stall: drop rather than smear old audio
+        }
+        [[SiperbConferenceAudioBus sharedBus] pushAux:auxId
+                                              samples:(const int16_t *)chunk.pcm.bytes
+                                                count:chunk.count
+                                           sampleRate:chunk.rate];
+    }
+}
+
 #pragma mark Teardown
 
 - (void)teardown {
@@ -535,6 +667,18 @@ static RTCVideoRotation RotationForTransform(CGAffineTransform t) {
     }
     _torn = YES;
     [self stopTimer];
+    // Bring the audio feeder down on its own queue so no tick runs after the reader is gone.
+    dispatch_sync(_audioQueue, ^{
+        [self stopAudioTimer];
+        if (self->_audioReader) {
+            [self->_audioReader cancelReading];
+            self->_audioReader = nil;
+        }
+        self->_audioOutput = nil;
+        [self->_audioFifo removeAllObjects];
+    });
+    _audioAsset = nil;
+    _audioTrack = nil;
     if (_player && _timeObserver) {
         [_player removeTimeObserver:_timeObserver];
         _timeObserver = nil;
@@ -548,13 +692,7 @@ static RTCVideoRotation RotationForTransform(CGAffineTransform t) {
         }
     }
     [_player pause];
-    // The mix goes before the item, the item before the tap: after this no callback can fire.
-    _item.audioMix = nil;
     [_player replaceCurrentItemWithPlayerItem:nil];
-    if (_tap) {
-        CFRelease(_tap);
-        _tap = NULL;
-    }
     if (self.auxId) {
         [[SiperbConferenceAudioBus sharedBus] removeAux:self.auxId];
     }
