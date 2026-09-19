@@ -117,6 +117,15 @@ export interface CallRecordingResult {
     withVideo: boolean;
     /** The container actually written — `"audio/mp4"` or `"video/mp4"`. */
     mimeType: string;
+    /**
+     * A poster frame for a video recording, as a `data:image/jpeg;base64,…` **data URL**, or
+     * absent for an audio-only segment. Generated natively from the finalized mp4 at stop
+     * (iOS `AVAssetImageGenerator`, Android `MediaMetadataRetriever`). A data URL rather than a
+     * `file://` uri because the recording row it lands on is replicated across the user's
+     * devices — a device-local path would render broken everywhere else. The web produces the
+     * same shape from its compositor canvas.
+     */
+    thumbnail?: string;
 }
 
 export type CallRecorderEvent = 'audioRecordingStarted' | 'audioRecordingStopped' | 'audioRecordingError';

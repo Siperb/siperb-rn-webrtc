@@ -6,6 +6,8 @@ export interface RecordingBlobInit {
     recordingId: string;
     durationMs: number;
     withVideo: boolean;
+    /** Data-URL poster (`data:image/jpeg;base64,…`) for a video recording; absent otherwise. */
+    thumbnail?: string;
 }
 
 /**
@@ -26,6 +28,9 @@ export default class RecordingBlob {
     readonly recordingId: string;
     readonly durationMs: number;
     readonly withVideo: boolean;
+    /** A `data:image/jpeg;base64,…` poster for a video recording, or `''`. Small enough to ride
+     *  on the recording row (which is synced), unlike `uri`, which is this device's path. */
+    readonly thumbnail: string;
 
     constructor(init: RecordingBlobInit) {
         this.size = init.size;
@@ -35,5 +40,6 @@ export default class RecordingBlob {
         this.recordingId = init.recordingId;
         this.durationMs = init.durationMs;
         this.withVideo = init.withVideo;
+        this.thumbnail = init.thumbnail || '';
     }
 }

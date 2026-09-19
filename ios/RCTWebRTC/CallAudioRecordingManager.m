@@ -1,5 +1,7 @@
 #import <os/lock.h>
 
+#import <AVFoundation/AVFoundation.h>
+#import <CoreImage/CoreImage.h>
 #import <React/RCTLog.h>
 
 #import "CallAudioRecorder.h"
@@ -19,6 +21,58 @@ static const NSInteger kLocalVideoSlot = -1;
  * from the recording it asked for. A video segment that lost its picture reports NO here and
  * hands back its .m4a, which is the honest answer rather than the requested one.
  */
+/**
+ * A poster frame for a recorded mp4, as a `data:image/jpeg;base64,…` data URL, or nil.
+ *
+ * A DATA URL, not a `file://` path, because the recording row it ends up on is replicated
+ * across the user's devices — a device-local path would render broken everywhere else. It is
+ * generated from the FINALIZED file (off the encoder hot path) with AVAssetImageGenerator, and
+ * JPEG-encoded with CoreImage's CIContext so no ImageIO/UIKit framework is pulled in. Scaled to
+ * 320px so the string stays small enough to ride on the synced row. Best-effort: a nil here just
+ * means no poster, never a failed recording.
+ */
+static NSString *SiperbVideoPosterDataURL(NSString *path) {
+    if (path.length == 0) {
+        return nil;
+    }
+    AVURLAsset *asset = [AVURLAsset URLAssetWithURL:[NSURL fileURLWithPath:path] options:nil];
+    AVAssetImageGenerator *generator = [AVAssetImageGenerator assetImageGeneratorWithAsset:asset];
+    generator.appliesPreferredTrackTransform = YES;  // honour the recording's rotation
+    generator.maximumSize = CGSizeMake(320, 320);
+    // Grab the nearest available frame to the start rather than demanding an exact t=0 keyframe.
+    generator.requestedTimeToleranceBefore = kCMTimePositiveInfinity;
+    generator.requestedTimeToleranceAfter = kCMTimePositiveInfinity;
+
+    NSError *error = nil;
+    CGImageRef cgImage = [generator copyCGImageAtTime:kCMTimeZero actualTime:NULL error:&error];
+    if (cgImage == NULL) {
+        RCTLogWarn(@"[CallRecording] poster generation failed: %@", error.localizedDescription ?: @"unknown");
+        return nil;
+    }
+
+    static CIContext *ciContext = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        ciContext = [CIContext contextWithOptions:nil];
+    });
+
+    CIImage *ciImage = [CIImage imageWithCGImage:cgImage];
+    CGImageRelease(cgImage);
+    CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+    NSData *jpeg = [ciContext JPEGRepresentationOfImage:ciImage
+                                            colorSpace:colorSpace
+                                               options:@{}];
+    CGColorSpaceRelease(colorSpace);
+    if (jpeg.length == 0) {
+        return nil;
+    }
+    NSString *base64 = [jpeg base64EncodedStringWithOptions:0];
+    if (base64.length == 0) {
+        return nil;
+    }
+    return [@"data:image/jpeg;base64," stringByAppendingString:base64];
+}
+
 static NSDictionary *AnnotateResult(NSDictionary *result, BOOL withVideo) {
     if (result == nil) {
         return nil;
@@ -26,6 +80,15 @@ static NSDictionary *AnnotateResult(NSDictionary *result, BOOL withVideo) {
     NSMutableDictionary *annotated = [result mutableCopy];
     annotated[@"withVideo"] = @(withVideo);
     annotated[@"mimeType"] = withVideo ? @"video/mp4" : @"audio/mp4";
+    // The web builds its poster from the compositor canvas; a DOM-less host has none, so the
+    // recording's thumbnail is generated here from the finalized mp4 and handed up in the stop
+    // result (JS RecordingBlob.thumbnail -> the SDK's recording.Thumbnail). Video segments only.
+    if (withVideo) {
+        NSString *poster = SiperbVideoPosterDataURL(annotated[@"filePath"]);
+        if (poster.length > 0) {
+            annotated[@"thumbnail"] = poster;
+        }
+    }
     return annotated;
 }
 

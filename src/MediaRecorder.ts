@@ -275,7 +275,8 @@ export default class MediaRecorder extends EventTarget<MediaRecorderEventMap> {
             path: result.filePath,
             recordingId: result.recordingId,
             durationMs: result.durationMs,
-            withVideo: result.withVideo
+            withVideo: result.withVideo,
+            thumbnail: result.thumbnail
         }));
     }
 

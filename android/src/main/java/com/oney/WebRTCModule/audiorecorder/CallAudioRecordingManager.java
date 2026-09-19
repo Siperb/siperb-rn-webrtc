@@ -1,6 +1,9 @@
 package com.oney.WebRTCModule.audiorecorder;
 
+import android.graphics.Bitmap;
 import android.media.AudioFormat;
+import android.media.MediaMetadataRetriever;
+import android.util.Base64;
 import android.util.Log;
 import android.util.Pair;
 
@@ -13,6 +16,7 @@ import org.webrtc.AudioTrack;
 import org.webrtc.VideoTrack;
 import org.webrtc.audio.JavaAudioDeviceModule;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -436,6 +440,10 @@ public class CallAudioRecordingManager {
             sizeBytes = video.sizeBytes;
         }
         String mimeType = withVideo ? "video/mp4" : "audio/mp4";
+        // The web builds its poster from the compositor canvas; a DOM-less host has none, so the
+        // recording's thumbnail is generated here from the finalized mp4 and handed up in the stop
+        // result (JS RecordingBlob.thumbnail -> the SDK's recording.Thumbnail). Video segments only.
+        String thumbnail = withVideo ? videoPosterDataUrl(filePath) : null;
 
         WritableMap result = Arguments.createMap();
         result.putString("recordingId", recordingId);
@@ -444,6 +452,9 @@ public class CallAudioRecordingManager {
         result.putDouble("size", sizeBytes);
         result.putBoolean("withVideo", withVideo);
         result.putString("mimeType", mimeType);
+        if (thumbnail != null) {
+            result.putString("thumbnail", thumbnail);
+        }
         promise.resolve(result);
 
         WritableMap event = Arguments.createMap();
@@ -454,7 +465,70 @@ public class CallAudioRecordingManager {
         event.putBoolean("withVideo", withVideo);
         event.putString("mimeType", mimeType);
         event.putString("reason", reason);
+        if (thumbnail != null) {
+            event.putString("thumbnail", thumbnail);
+        }
         module.sendEvent("audioRecordingStopped", event);
+    }
+
+    /**
+     * A poster frame for a recorded mp4, as a {@code data:image/jpeg;base64,…} data URL, or null.
+     *
+     * A DATA URL, not a {@code file://} path, because the recording row it ends up on is
+     * replicated across the user's devices — a device-local path would render broken everywhere
+     * else. Read from the FINALIZED file (off the encoder path) with MediaMetadataRetriever and
+     * scaled to 320px so the string stays small enough to ride on the synced row. Best-effort: a
+     * null here just means no poster, never a failed recording.
+     */
+    private static String videoPosterDataUrl(String path) {
+        if (path == null || path.isEmpty()) {
+            return null;
+        }
+        MediaMetadataRetriever retriever = new MediaMetadataRetriever();
+        Bitmap frame = null;
+        Bitmap scaled = null;
+        try {
+            retriever.setDataSource(path);
+            // The nearest sync frame to the start, rather than demanding an exact t=0 keyframe.
+            frame = retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
+            if (frame == null) {
+                return null;
+            }
+            scaled = scaleBitmapToMax(frame, 320);
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            scaled.compress(Bitmap.CompressFormat.JPEG, 60, out);
+            byte[] bytes = out.toByteArray();
+            if (bytes.length == 0) {
+                return null;
+            }
+            return "data:image/jpeg;base64," + Base64.encodeToString(bytes, Base64.NO_WRAP);
+        } catch (Exception e) {
+            Log.w(TAG, "poster generation failed: " + e.getMessage());
+            return null;
+        } finally {
+            if (scaled != null && scaled != frame) {
+                scaled.recycle();
+            }
+            if (frame != null) {
+                frame.recycle();
+            }
+            try {
+                retriever.release();
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    private static Bitmap scaleBitmapToMax(Bitmap src, int maxDim) {
+        int w = src.getWidth();
+        int h = src.getHeight();
+        if (w <= maxDim && h <= maxDim) {
+            return src;
+        }
+        float scale = Math.min((float) maxDim / w, (float) maxDim / h);
+        int nw = Math.max(1, Math.round(w * scale));
+        int nh = Math.max(1, Math.round(h * scale));
+        return Bitmap.createScaledBitmap(src, nw, nh, true);
     }
 
     void failStop(Promise promise, String recordingId, String message) {
